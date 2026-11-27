@@ -1076,7 +1076,8 @@ describe("setupDelivery — Channel effect binding", () => {
         executorId: executor.executorId,
         synchronizePermission: async (snapshot, assets) => {
           const cap = await executor.installPermissionSnapshot(snapshot);
-          if (assets) await executor.installExecutionAssetBundle(assets);
+          const resolvedAssets = typeof assets === "function" ? await assets() : assets;
+          if (resolvedAssets) await executor.installExecutionAssetBundle(resolvedAssets);
           return cap;
         },
       });

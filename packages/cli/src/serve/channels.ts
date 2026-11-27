@@ -56,6 +56,8 @@ export interface SetupChannelsOptions {
   readonly artifactDirectory: string;
   readonly httpRoutes: Map<string, HttpHandler>;
   readonly notifyOperation?: (operation: ExtensionOperation) => Promise<unknown>;
+  readonly planContinuation?: import("@zhixing-ai/core/extensions/onboarding").ExtensionOnboardingPorts["planContinuation"];
+  readonly deliverContinuation?: import("@zhixing-ai/core/extensions/onboarding").ExtensionOnboardingPorts["deliverContinuation"];
   readonly preparationClosed?: (operation: ExtensionOperation) => Promise<boolean>;
   readonly repairSource?: (instance: ExtensionInstance) => Promise<ExtensionOperation["source"] | undefined>;
   logger: ChannelLogger;
@@ -169,7 +171,10 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     }).catch(() => undefined);
     observations.add(observation); void observation.finally(() => observations.delete(observation));
   };
-  const verification = new ChannelVerification(application, options.configuration.secretPort(), (id) => runtime.current(id), changedOperation);
+  const verification = new ChannelVerification(application, options.configuration.secretPort(), (id) => runtime.current(id), async () => {
+    await snapshot();
+    changedOperation();
+  });
   const runtime: ManagedExtensions = new ManagedExtensions({
     recordsFor: (instance, generation) => options.bindLogs?.(EXTENSION_LOG_SOURCE, { scope: "storage" }, [
       { kind: "extension", id: instance.id }, { kind: "generation", id: generation },
@@ -206,6 +211,9 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
             if (await verification.accept(current, message)) return;
             const admitted = await application.get(instance.id);
             if (!admitted?.enabled || admitted.generation !== instance.generation || (admitted.admission && !admitted.admission.ready)) throw new Error("连接准入已变化");
+            if (!instances.some((item) => item.id === admitted.id && item.enabled && (!item.admission || item.admission.ready))) {
+              await snapshot();
+            }
             if (selected.inbound.kind !== "router") throw new Error("Inbound Channel unavailable");
             await selected.inbound.handleMessage(message);
           },
@@ -376,6 +384,8 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
       if (!options.notifyOperation) throw new Error("原请求结果入口尚未就绪");
       return options.notifyOperation(operation);
     },
+    ...(options.planContinuation ? { planContinuation: options.planContinuation } : {}),
+    ...(options.deliverContinuation ? { deliverContinuation: options.deliverContinuation } : {}),
     preparationClosed: options.preparationClosed,
     repairSource: options.repairSource,
     isActive: () => active && ownerRequested && !closed && !admissionPaused && options.isCurrentOwner(),

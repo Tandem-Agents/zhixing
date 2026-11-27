@@ -989,4 +989,119 @@ describe("ConversationProtocolRuntime", () => {
       prepareSpy.mockRestore();
     }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("defaults fresh non-workscene conversations to local Anchor executor when remote executors are also online", async () => {
+    const { DeviceKey, enrollDeviceIdentity } = await import("@zhixing-ai/mesh/device-identity");
+    const { createSignedCapabilityDescriptor, createSignedExecutorVersionInventory } = await import("@zhixing-ai/core/protocol");
+    const { ConversationAssignmentLedger, InProcessAssignmentSubmission } = await import("@zhixing-ai/executor");
+    const { anchorConversationOwnerRuntime } = await import("../conversation-owner-runtime.js");
+
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const home = await fs.mkdtemp(nodePath.join(os.tmpdir(), "zhixing-anchor-affinity-"));
+    try {
+      const now = new Date().toISOString();
+      const anchorKey = await DeviceKey.generate();
+      const remoteKey = await DeviceKey.generate();
+      const anchorIdent = enrollDeviceIdentity(anchorKey, { displayName: "anchor", platform: "windows", enrolledAt: now });
+      const remoteIdent = enrollDeviceIdentity(remoteKey, { displayName: "remote", platform: "windows", enrolledAt: now });
+      const remoteExecId = `exec:${remoteIdent.deviceId}`;
+      const remoteCap = {
+        descriptor: createSignedCapabilityDescriptor(
+          {
+            executorId: remoteExecId,
+            revision: 1,
+            protocolVersion: "2",
+            workspaces: [],
+            tools: ["read", "runtime_inspect", "skill_read"],
+            mcpServers: [],
+            credentialBindings: [],
+            evidenceCapabilities: ["artifact"],
+            at: now,
+          },
+          remoteKey,
+        ),
+        inventory: createSignedExecutorVersionInventory(
+          {
+            executorId: remoteExecId,
+            inventoryRevision: 1,
+            capabilityRevision: 1,
+            configVersions: { runtimeConfigRev: 1, modelProfileRev: 1, policyRev: 1 },
+            assetVersions: { skillsRev: 2, rubricsRev: 2, promptAssetsRev: 2 },
+            permissionSnapshotHighWater: 0,
+            credentialBindingRevisions: [],
+            at: now,
+          },
+          remoteKey,
+        ),
+      };
+
+      const authority = await setupAuthorityRuntime({
+        zhixingHome: home,
+        secretStore: new MemorySecretStore(),
+        deviceKey: anchorKey,
+        trustedIdentities: [anchorIdent, remoteIdent],
+        authorizedDeviceIds: [anchorIdent.deviceId, remoteIdent.deviceId],
+        executorReadiness: TEST_EXECUTOR_READINESS,
+        clock: () => now,
+      });
+      try {
+        const boundary = createConversationExecutorHostBoundary({
+          authority: anchorConversationOwnerRuntime(authority),
+          directory: {
+            candidates: async () => [
+              {
+                executorId: remoteExecId,
+                deviceId: remoteIdent.deviceId,
+                synchronizePermission: async () => remoteCap,
+              },
+            ],
+            forExecutor: (id) =>
+              id === remoteExecId
+                ? {
+                    dispatch: async () => {
+                      throw new Error("unused");
+                    },
+                  }
+                : undefined,
+          },
+          clock: () => now,
+          local: {
+            ConversationAssignmentLedger,
+            InProcessAssignmentSubmission,
+            runtimeFactory: {
+              create: async () => {
+                throw new Error("unused");
+              },
+            },
+          },
+        });
+
+        // 1) Brand-new main/channel conversation defaults to local Anchor executor without ExecutorSelectionRequiredError
+        const mainPlan = await boundary.application.plan({
+          conversationId: "conv_main_fresh",
+          requirement: { placement: "authorized-device" },
+          executionProfile: { tools: ["read"], mcpServers: [], providerIds: [] },
+          permissionRules: [],
+        });
+        expect(mainPlan.assignment.executorId).toBe(authority.executorId);
+        expect(mainPlan.assignment.policy.permissionSnapshot).toBeTruthy();
+
+        // 2) Brand-new workscene conversation still requires explicit selection / workspace binding when multiple candidates match
+        await expect(
+          boundary.application.plan({
+            conversationId: "ws:scene-1:primary",
+            requirement: { placement: "authorized-device" },
+            executionProfile: { tools: ["read"], mcpServers: [], providerIds: [] },
+            permissionRules: [],
+          }),
+        ).rejects.toThrow("requires an explicit executor selection");
+      } finally {
+        await authority.stopStorageMaintenance();
+      }
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 });

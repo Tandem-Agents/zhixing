@@ -720,6 +720,17 @@ export async function createConversationServices(
         runtime: projectConversationPerspectivesRuntime(
           input.managed,
           input.managed.runtime,
+          {
+            conversationId: input.managed.conversationId,
+            refs: [
+              ...(input.turnContext?.turnId ? [{ kind: "turn" as const, id: input.turnContext.turnId }] : []),
+            ],
+          },
+          {
+            conversationId: input.managed.conversationId,
+            runtimeKind: "conversation",
+            ...(input.turnContext?.turnOrigin ? { turnOrigin: input.turnContext.turnOrigin } : {}),
+          },
         ),
         originalInput: input.originalInput,
         question: input.question,
@@ -1407,6 +1418,8 @@ function channelOwnership(
 export interface PrepareChannelInput {
   readonly bindLogs?: import("@zhixing-ai/core/logging").BindLogSource;
   readonly notifyOperation?: (operation: import("@zhixing-ai/core/extensions/contracts").ExtensionOperation) => Promise<unknown>;
+  readonly planContinuation?: import("@zhixing-ai/core/extensions/onboarding").ExtensionOnboardingPorts["planContinuation"];
+  readonly deliverContinuation?: import("@zhixing-ai/core/extensions/onboarding").ExtensionOnboardingPorts["deliverContinuation"];
   readonly preparationClosed?: (operation: import("@zhixing-ai/core/extensions/contracts").ExtensionOperation) => Promise<boolean>;
   readonly repairSource?: (instance: import("@zhixing-ai/core/extensions/contracts").ExtensionInstance) => Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionOperation["source"] | undefined>;
   readonly authorityRuntime: AuthorityRuntimeStack;
@@ -1447,6 +1460,8 @@ export async function prepareChannel(
       httpRoutes: inputChannelHttpRoutes,
       logger: channelLogger,
       notifyOperation: input.notifyOperation,
+      planContinuation: input.planContinuation,
+      deliverContinuation: input.deliverContinuation,
       preparationClosed: input.preparationClosed,
       repairSource: input.repairSource,
     });

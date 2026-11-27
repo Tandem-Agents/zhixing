@@ -800,7 +800,8 @@
         "conversationId: string;",
         "sessionId: string;",
         "turnId: string;",
-        "result: WireAgentResult;"
+        "result: WireAgentResult;",
+        "publishConflicts?: number;"
       ],
       "kind": "interface",
       "name": "SessionCompletePayload"
@@ -1169,6 +1170,11 @@
       "name": "SessionUsageResult"
     },
     {
+      "definition": "| SkillCatalogCommand | { readonly kind: \"set-visibility\"; readonly skillId: string; readonly visibility: SkillVisibility; readonly expectedRevision?: number; }",
+      "kind": "type",
+      "name": "SkillCatalogRpcCommand"
+    },
+    {
       "definition": [
         "request<T = unknown>(method: string, params?: unknown): Promise<T>;"
       ],
@@ -1237,7 +1243,7 @@
     },
     {
       "kind": "import",
-      "references": 18,
+      "references": 23,
       "sourceZone": "cli/runtime",
       "target": "cli/serve"
     },
@@ -1249,7 +1255,7 @@
     },
     {
       "kind": "import",
-      "references": 67,
+      "references": 71,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/core"
     },
@@ -1297,7 +1303,7 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 7,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/server"
     },
@@ -1327,7 +1333,7 @@
     },
     {
       "kind": "type-import",
-      "references": 58,
+      "references": 61,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/core"
     },
@@ -1363,7 +1369,7 @@
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 1,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/server"
     },
@@ -1405,7 +1411,7 @@
     },
     {
       "kind": "import",
-      "references": 42,
+      "references": 44,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
@@ -1417,7 +1423,7 @@
     },
     {
       "kind": "import",
-      "references": 350,
+      "references": 391,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/core"
     },
@@ -1429,19 +1435,19 @@
     },
     {
       "kind": "import",
-      "references": 120,
+      "references": 122,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/mesh"
     },
     {
       "kind": "import",
-      "references": 20,
+      "references": 21,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/orchestrator"
     },
     {
       "kind": "import",
-      "references": 62,
+      "references": 67,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/owner-kernel"
     },
@@ -1459,7 +1465,7 @@
     },
     {
       "kind": "import",
-      "references": 11,
+      "references": 12,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/rpc"
     },
@@ -1477,7 +1483,7 @@
     },
     {
       "kind": "import",
-      "references": 19,
+      "references": 22,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/server"
     },
@@ -1489,19 +1495,19 @@
     },
     {
       "kind": "import",
-      "references": 1,
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/tools-builtin"
     },
     {
       "kind": "type-import",
-      "references": 16,
+      "references": 17,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
     {
       "kind": "type-import",
-      "references": 272,
+      "references": 282,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/core"
     },
@@ -1513,13 +1519,13 @@
     },
     {
       "kind": "type-import",
-      "references": 89,
+      "references": 91,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/mesh"
     },
     {
       "kind": "type-import",
-      "references": 8,
+      "references": 9,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/orchestrator"
     },
@@ -1585,7 +1591,7 @@
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 9,
       "sourceZone": "core/conversation",
       "target": "core/protocol"
     },
@@ -1705,7 +1711,7 @@
     },
     {
       "kind": "import",
-      "references": 26,
+      "references": 27,
       "sourceZone": "orchestrator/runtime",
       "target": "package:@zhixing-ai/core"
     },
@@ -1729,13 +1735,13 @@
     },
     {
       "kind": "import",
-      "references": 207,
+      "references": 211,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing-ai/core"
     },
     {
       "kind": "type-import",
-      "references": 171,
+      "references": 172,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing-ai/core"
     },
@@ -1855,7 +1861,7 @@
     },
     {
       "kind": "import",
-      "references": 28,
+      "references": 31,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing-ai/core"
     },
@@ -1879,7 +1885,7 @@
     },
     {
       "kind": "type-import",
-      "references": 13,
+      "references": 12,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing-ai/core"
     },

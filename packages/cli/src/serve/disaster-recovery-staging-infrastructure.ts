@@ -1,19 +1,27 @@
 import { withLogRefs, type LogRecordPort } from "@zhixing-ai/core/logging";
 import type { Dir } from "node:fs";
-import { lstat, opendir, rm, rmdir, stat, unlink } from "node:fs/promises";
+import { copyFile, lstat, mkdir, opendir, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  collectArtifactRefs,
   FileArtifactStore,
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
   type ArtifactStore,
+  type AuthorityCommitLog,
 } from "@zhixing-ai/core/authority";
+import type { ArtifactRef, CommitEnvelope } from "@zhixing-ai/core/contracts";
 import {
   runStorageMaintenanceStep,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
 } from "@zhixing-ai/core/resources";
-import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { byteDigest, protocolDigest } from "@zhixing-ai/core/protocol";
+import {
+  createRestorePointArtifactStore,
+  statNonEmptyFile,
+  verifyRestorePointRecoverable,
+} from "./disaster-recovery-restore-point.js";
 import { DisasterRecoveryCandidateJournal } from "./disaster-recovery-candidate.js";
 import {
   DisasterRecoveryTransferJournal,
@@ -190,6 +198,147 @@ export function createDisasterRecoveryStagingInfrastructure(options: Readonly<{
       }) satisfies DisasterRecoveryTargetStaging;
       openResources.add(resource);
       return target;
+    },
+    async preserveLiveRestorePoint(input: Readonly<{
+      transferId: string;
+      authorityLog: Pick<AuthorityCommitLog, "checkpoint" | "originCheckpoint" | "rebuildProjection">;
+      sharedArtifacts: ArtifactStore;
+      now?: () => number;
+    }>): Promise<void> {
+      assertOpen();
+      assertTransferId(input.transferId);
+      const restoreDir = path.resolve(
+        options.zhixingHome,
+        "recovery-restore-points",
+        input.transferId,
+      );
+      const manifestPath = path.join(restoreDir, "restore-point.json");
+      const logWithPaths = input.authorityLog as {
+        readonly logPath?: string;
+        readonly identityPath?: string;
+        readonly rootDir?: string;
+      };
+      const liveWalPath =
+        logWithPaths.logPath ??
+        (logWithPaths.rootDir ? path.join(logWithPaths.rootDir, "authority.log") : undefined);
+      const liveIdentityPath =
+        logWithPaths.identityPath ??
+        (logWithPaths.rootDir ? path.join(logWithPaths.rootDir, "authority.log.identity") : undefined);
+      const hasWalFile = await statNonEmptyFile(liveWalPath);
+      const hasIdentityFile = await statNonEmptyFile(liveIdentityPath);
+      const currentCheckpoint = await input.authorityLog.checkpoint();
+      if (currentCheckpoint.lsn === 0 && !hasWalFile && !hasIdentityFile) {
+        return;
+      }
+
+      if (await pathExists(restoreDir)) {
+        const verifiedExisting =
+          (await pathExists(manifestPath)) &&
+          (await verifyRestorePointRecoverable({
+            restoreDir,
+            manifestPath,
+            expectedCheckpoint: currentCheckpoint,
+            expectedHasWal: hasWalFile,
+            expectedHasIdentity: hasIdentityFile,
+          }));
+        if (verifiedExisting) return;
+        await rm(restoreDir, { recursive: true, force: true });
+      }
+
+      try {
+        const originCheckpoint = currentCheckpoint.lsn > 0
+          ? await input.authorityLog.originCheckpoint()
+          : undefined;
+        const envelopes = await input.authorityLog.rebuildProjection<CommitEnvelope<unknown>[]>(
+          [],
+          (items, _record, envelope) => {
+            if (items.length === 0 || items[items.length - 1]!.lsn !== envelope.lsn) {
+              items.push(envelope);
+            }
+            return items;
+          },
+        );
+        if (currentCheckpoint.lsn > 0) {
+          if (
+            envelopes.length === 0 ||
+            envelopes[envelopes.length - 1]!.lsn !== currentCheckpoint.lsn
+          ) {
+            throw new Error(
+              `Live authority envelopes do not reach checkpoint LSN ${currentCheckpoint.lsn}`,
+            );
+          }
+          if (liveWalPath !== undefined && !hasWalFile) {
+            throw new Error("Live authority WAL is missing while checkpoint LSN is non-zero");
+          }
+        }
+
+        const artifactsDir = path.join(restoreDir, "artifacts");
+        await mkdir(artifactsDir, { recursive: true, mode: 0o700 });
+        const restoreArtifacts = createRestorePointArtifactStore(restoreDir);
+
+        const refsByDigest = new Map<string, ArtifactRef>();
+        for (const envelope of envelopes) {
+          for (const ref of collectArtifactRefs(envelope.entries)) {
+            if (!refsByDigest.has(ref.digest)) {
+              refsByDigest.set(ref.digest, ref);
+            }
+          }
+        }
+        const preservedRefs: ArtifactRef[] = [];
+        for (const ref of refsByDigest.values()) {
+          const bytes = await input.sharedArtifacts.get(ref);
+          if (bytes.byteLength !== ref.bytes || byteDigest(bytes) !== ref.digest) {
+            throw new Error(`Live restore artifact digest or size mismatch for ${ref.digest}`);
+          }
+          const putRef = await restoreArtifacts.put(bytes);
+          if (putRef.digest !== ref.digest || putRef.bytes !== ref.bytes) {
+            throw new Error(`Restore artifact store mismatch for ${ref.digest}`);
+          }
+          preservedRefs.push(ref);
+        }
+
+        if (hasWalFile && liveWalPath) {
+          await atomicCopyFile(liveWalPath, path.join(restoreDir, "authority.log"));
+        }
+        if (hasIdentityFile && liveIdentityPath) {
+          await atomicCopyFile(liveIdentityPath, path.join(restoreDir, "authority.log.identity"));
+        }
+        await atomicWriteFile(
+          path.join(restoreDir, "authority-envelopes.json"),
+          Buffer.from(JSON.stringify(envelopes), "utf8"),
+        );
+
+        await atomicWriteFile(
+          manifestPath,
+          Buffer.from(JSON.stringify({
+            v: 1,
+            transferId: input.transferId,
+            createdAt: new Date(input.now?.() ?? Date.now()).toISOString(),
+            checkpoint: currentCheckpoint,
+            checkpointLsn: currentCheckpoint.lsn,
+            ...(originCheckpoint ? { originCheckpoint } : {}),
+            envelopeCount: envelopes.length,
+            hasAuthorityLog: hasWalFile,
+            hasAuthorityWal: hasWalFile,
+            hasAuthorityIdentity: hasIdentityFile,
+            ...(hasWalFile ? { authorityLogFile: "authority.log" } : {}),
+            artifacts: preservedRefs,
+          }), "utf8"),
+        );
+        const verifiedFresh = await verifyRestorePointRecoverable({
+          restoreDir,
+          manifestPath,
+          expectedCheckpoint: currentCheckpoint,
+          expectedHasWal: hasWalFile,
+          expectedHasIdentity: hasIdentityFile,
+        });
+        if (!verifiedFresh) {
+          throw new Error("Preserved live restore point failed recoverability verification");
+        }
+      } catch (error) {
+        await unlink(manifestPath).catch(ignoreMissingPath);
+        throw error;
+      }
     },
     async cleanupPostInstall(transferId: string): Promise<void> {
       await closeTransferSessions(transferId, openTransfers);
@@ -407,6 +556,34 @@ class BoundedRemovalWalker {
     }
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, "Removal cursor close failed");
+  }
+}
+
+async function atomicWriteFile(target: string, bytes: Uint8Array): Promise<void> {
+  const tmp = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.${process.pid}.tmp`,
+  );
+  try {
+    await writeFile(tmp, bytes, { flag: "wx", mode: 0o600 });
+    await rename(tmp, target);
+  } catch (error) {
+    await unlink(tmp).catch(ignoreMissingPath);
+    throw error;
+  }
+}
+
+async function atomicCopyFile(source: string, target: string): Promise<void> {
+  const tmp = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.${process.pid}.tmp`,
+  );
+  try {
+    await copyFile(source, tmp);
+    await rename(tmp, target);
+  } catch (error) {
+    await unlink(tmp).catch(ignoreMissingPath);
+    throw error;
   }
 }
 

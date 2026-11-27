@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@zhixing-ai/core";
 import type { JobExecutionInstruction } from "@zhixing-ai/core/contracts";
 import type { AgentRoleProfile } from "@zhixing-ai/orchestrator/profile";
+import { LEGACY_COMPAT_BUILTIN_TOOLS } from "@zhixing-ai/tools-builtin";
 import {
   createRuntimeToolProjection,
   type RuntimeToolProjection,
@@ -42,6 +43,7 @@ export function selectJobRuntimeTools(
   {
     const available = new Set([
       ...input.baseProfile.enabledTools,
+      ...LEGACY_COMPAT_BUILTIN_TOOLS,
       ...input.extraTools.map((tool) => tool.name),
     ]);
     const unknown = [...requested].filter((tool) => !available.has(tool));
@@ -59,11 +61,15 @@ export function selectJobRuntimeTools(
       `Job requested unavailable MCP servers: ${unavailableServers.join(", ")}`,
     );
   }
+  const eligibleProfileTools = [...new Set([
+    ...input.baseProfile.enabledTools,
+    ...LEGACY_COMPAT_BUILTIN_TOOLS,
+  ])];
   const profile = Object.freeze({
     ...input.baseProfile,
     constraints: Object.freeze([...input.baseProfile.constraints]),
     enabledTools: Object.freeze(
-      input.baseProfile.enabledTools.filter((tool) => requested.has(tool)),
+      eligibleProfileTools.filter((tool) => requested.has(tool)),
     ),
     ...(input.baseProfile.capabilities
       ? { capabilities: Object.freeze({ ...input.baseProfile.capabilities }) }

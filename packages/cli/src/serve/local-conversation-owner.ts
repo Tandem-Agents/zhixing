@@ -134,6 +134,7 @@ export interface LocalConversationOwnerPort {
   createConversation(): Promise<string>;
   ensureSession(conversationId: string): Promise<void>;
   listConversations(): Promise<readonly string[]>;
+  findDurableRunByIngress?: ConversationManager["findDurableRunByIngress"];
   runtimeState(conversationId: string): { readonly active: boolean; readonly busy: boolean; readonly pendingCount: number };
   listConversationAuthorities(): Promise<readonly {
     readonly conversationId: string;
@@ -258,6 +259,7 @@ export class LocalConversationOwnerAssembly {
   readonly #port: LocalConversationOwnerPort;
   readonly #closeDrainBudgetMs: number;
   readonly #currentAnchorDeviceId: () => string | undefined;
+  #targetSupportsV2InputSources: (targetDeviceId: string) => boolean | Promise<boolean>;
   #state: "created" | "starting" | "ready" | "closing" | "closed" = "created";
   #started = false;
   #starting: Promise<void> | undefined;
@@ -303,6 +305,7 @@ export class LocalConversationOwnerAssembly {
     this.#runListeners = input.runListeners;
     this.#processProjection = input.processProjection;
     this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
+    this.#targetSupportsV2InputSources = (targetDeviceId) => targetDeviceId === this.#owner.deviceId;
     this.#transferSource = new ConversationTransferSource({
       deviceId: this.#owner.deviceId,
       log: this.#owner.executorLog,
@@ -311,6 +314,8 @@ export class LocalConversationOwnerAssembly {
       storageMaintenance: this.#owner.storageMaintenance,
       abortSignal: () => this.#transferAbort.signal,
       verifier: this.#owner.verifier,
+      targetSupportsV2InputSources: (targetDeviceId) =>
+        this.#targetSupportsV2InputSources(targetDeviceId),
       acceptsConversationId: (conversationId) =>
         this.#owner.acceptsConversationId(conversationId),
       accepting: () =>
@@ -535,6 +540,7 @@ export class LocalConversationOwnerAssembly {
         return authorities;
       },
       currentAuthority: (conversationId) => this.#currentAuthority(conversationId),
+      findDurableRunByIngress: (...args) => this.#manager.findDurableRunByIngress(...args),
       runtimeState: (conversationId) => ({ active: this.#manager.has(conversationId), busy: this.#manager.getSession(conversationId)?.busy ?? false, pendingCount: this.#manager.pendingCount(conversationId) }),
       commitConversationClear: async ({ conversationId, operationId }) => {
         return this.#runCommand(async () => {
@@ -1379,6 +1385,12 @@ export class LocalConversationOwnerAssembly {
 
   transferSource(): ConversationTransferSource {
     return this.#transferSource;
+  }
+
+  bindTransferTargetCompatibility(
+    check: (targetDeviceId: string) => boolean | Promise<boolean>,
+  ): void {
+    this.#targetSupportsV2InputSources = check;
   }
 
   transferIdentity(): {

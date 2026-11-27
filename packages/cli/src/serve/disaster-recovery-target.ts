@@ -11,9 +11,9 @@ import type {
   SecretStorePort,
   TransferRecord,
 } from "@zhixing-ai/core/contracts";
-import type {
-  ArtifactStore,
-  PlannedAnchorPrefixInstallation,
+import {
+  type ArtifactStore,
+  type PlannedAnchorPrefixInstallation,
 } from "@zhixing-ai/core/authority";
 import {
   runStorageMaintenanceStep,
@@ -230,6 +230,7 @@ export class DisasterRecoveryTransferJournal {
 
 export interface DisasterRecoveryInstallAuthorityPort
   extends DisasterRecoveryAuthorityProjectionPort {
+  checkpoint?: import("@zhixing-ai/core/authority").AuthorityCommitLog["checkpoint"];
   installPlannedAnchorPrefix<Body>(
     input: PlannedAnchorPrefixInstallation<Body>,
   ): Promise<CommitEnvelope<Body>>;
@@ -904,6 +905,7 @@ export class DisasterRecoveryTarget {
         canonicalize(stored.authorityRecords.source) !==
         canonicalize(input.decision.installation.sourceHead)
       ) throw new Error("Disaster authority source differs from its install decision");
+      await this.#preserveLiveRestorePoint(input.transferId);
       await this.options.authorityLog.installPlannedAnchorPrefix({
         source: disasterAuthorityEnvelopes(input.context.artifacts, stored.authorityRecords),
         sourceHead: input.decision.installation.sourceHead,
@@ -1015,6 +1017,23 @@ export class DisasterRecoveryTarget {
         ),
       );
     }
+  }
+
+  async #preserveLiveRestorePoint(transferId: string): Promise<void> {
+    const log = this.options.authorityLog;
+    if (!this.options.staging.preserveLiveRestorePoint || !log.checkpoint) {
+      return;
+    }
+    await this.options.staging.preserveLiveRestorePoint({
+      transferId,
+      authorityLog: {
+        checkpoint: log.checkpoint.bind(log),
+        originCheckpoint: log.originCheckpoint.bind(log),
+        rebuildProjection: log.rebuildProjection.bind(log),
+      },
+      sharedArtifacts: this.options.sharedArtifacts,
+      ...(this.options.now ? { now: this.options.now } : {}),
+    });
   }
 
   async #context(

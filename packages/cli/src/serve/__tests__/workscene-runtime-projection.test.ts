@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildSystemPrompt, CACHE_BOUNDARY } from "@zhixing-ai/orchestrator/runtime";
+import { buildSystemPrompt } from "@zhixing-ai/orchestrator/runtime";
 import { WORKING_MODE_TEXT } from "../workscene-agent-guidance.js";
 import { ZHIXING_IDENTITY, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
 import {
@@ -143,7 +143,7 @@ describe("Workscene product runtime projection", () => {
     expect(projection.workspace).toBe(null);
     expect(projection.profile.enabledTools).not.toContain("read");
     const read = vi.fn();
-    expect((await projection.windowPrompt.project({ read } as never)).content).toBe("");
+    expect((await projection.windowPrompt.project({ read } as never)).content).toContain("system:知行系统认知");
     expect(read).not.toHaveBeenCalled();
   });
   it("does not widen already-issued tool/server sets after additive activation", () => {
@@ -190,10 +190,8 @@ describe("Workscene product runtime projection", () => {
     const mainSystemPrompt = buildSystemPrompt({
       profile: main.profile, tools: [...main.runtimeTools.extraTools], cwd: "/workspace",
     });
-    expect(mainSystemPrompt).toContain(WORKING_MODE_TEXT);
-    expect(mainSystemPrompt.indexOf(WORKING_MODE_TEXT)).toBeLessThan(mainSystemPrompt.indexOf(CACHE_BOUNDARY));
-    expect(main.runtimeTools.extraTools.filter((tool) => tool.systemPromptGuidance !== undefined))
-      .toHaveLength(1);
+    expect(mainSystemPrompt).not.toContain(WORKING_MODE_TEXT);
+    expect(main.runtimeTools.extraTools.every((tool) => tool.systemPromptGuidance === undefined)).toBe(true);
     expect(withWorkspace.runtimeTools.extraTools.every((tool) => tool.systemPromptGuidance === undefined)).toBe(true);
     expect(withoutWorkspace.runtimeTools.extraTools.every((tool) => tool.systemPromptGuidance === undefined)).toBe(true);
     expect(withWorkspace.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
@@ -285,10 +283,10 @@ describe("Workscene product runtime projection", () => {
     }
     expect(withWorkspace.profile.instructions).toContain('当前工作场景名称："写作场景"');
     expect(withWorkspace.profile.enabledTools).toContain("read");
-    expect(withWorkspace.profile.enabledTools).toContain("admit_skill");
+    expect(withWorkspace.profile.enabledTools).toContain("skill_admit");
     expect(withoutWorkspace.workspace).toBeNull();
     expect(withoutWorkspace.profile.enabledTools).not.toContain("read");
-    expect(withoutWorkspace.profile.enabledTools).not.toContain("admit_skill");
+    expect(withoutWorkspace.profile.enabledTools).not.toContain("skill_admit");
   });
 
   it("forms ephemeral and durable-job projections from the same exact product facts", async () => {
@@ -529,5 +527,52 @@ describe("Anchor conversation runtime routing", () => {
 
     await expect(create("conversation-main")).rejects.toBe(failure);
     expect(issue).not.toHaveBeenCalled();
+  });
+
+  it("issues owner-side power projection with workspace:null while preserving workspace tools for remote-device scenes", async () => {
+    const projections = fixture();
+    const issued: Parameters<
+      Parameters<typeof createWorksceneConversationRuntimeFactory>[0]["issue"]
+    >[0][] = [];
+    const resolveWorkspaceRoot = vi.fn(async () => "/local-root");
+    const prepareWorkspaceRoot = vi.fn(async () => {});
+    const create = createWorksceneConversationRuntimeFactory({
+      issue: async (projection) => {
+        issued.push(projection);
+        return { marker: "runtime" } as never;
+      },
+      projections,
+      localDeviceId: "device-anchor",
+      projectConversationRuntime: async ({ conversationId }) => {
+        if (conversationId === "ws:scene-remote:primary") {
+          return scene({
+            scene: { sceneId: "scene-remote", name: "远端工作场景" },
+            workspace: { deviceId: "device-remote", bindingRef: "binding-remote" },
+          });
+        }
+        return scene({
+          scene: { sceneId: "scene-local", name: "本机工作场景" },
+          workspace: { deviceId: "device-anchor", bindingRef: "binding-local" },
+        });
+      },
+      resolveWorkspaceRoot,
+      prepareWorkspaceRoot,
+    });
+
+    await create("ws:scene-remote:primary");
+    expect(resolveWorkspaceRoot).not.toHaveBeenCalled();
+    expect(prepareWorkspaceRoot).not.toHaveBeenCalled();
+    expect(issued[0]).toMatchObject({ workspace: null, primaryRole: "power" });
+    expect(issued[0]!.profile.enabledTools).toEqual(
+      expect.arrayContaining(["read", "write", "bash", "skill_materialize"]),
+    );
+
+    await create("ws:scene-local:primary");
+    expect(resolveWorkspaceRoot).toHaveBeenCalledWith(
+      "scene-local",
+      { deviceId: "device-anchor", bindingRef: "binding-local" },
+    );
+    expect(prepareWorkspaceRoot).toHaveBeenCalledWith("scene-local", "/local-root");
+    expect(issued[1]).toMatchObject({ workspace: "/local-root", primaryRole: "power" });
   });
 });

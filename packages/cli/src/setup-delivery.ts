@@ -145,7 +145,13 @@ import {
 import {
   FileExecutionAssetCache,
   type ExecutionAssetCatalogPort,
+  type ExecutionAssetV2SyncSource,
 } from "./serve/execution-asset-cache.js";
+import {
+  createExecutionAssetV2SyncHandler,
+  type ExecutionSnapshotV2SyncHandler,
+} from "./serve/execution-snapshot-v2-sync.js";
+import { executorSupportsCrossDeviceV2 } from "./serve/workscene-runtime-projection.js";
 import type { InstalledAuthorityGeneration } from "./serve/planned-anchor-transfer.js";
 import { FileWorkspaceProbePersistence } from "./serve/workspace-probe-persistence.js";
 import { FileWorkspaceBindingGenerationPersistenceFactory } from "./serve/workspace-binding-generation-persistence.js";
@@ -326,6 +332,8 @@ export interface AuthorityRuntimeStack {
   readonly latestPermissionSnapshot: () => Promise<TrustRuleSnapshot | undefined>;
   readonly executionAssetCatalog: ExecutionAssetCatalogPort;
   readonly currentExecutionAssetBundle: () => Promise<ExecutionAssetBundle | undefined>;
+  readonly currentExecutionAssetSyncV2?: () => Promise<ExecutionAssetV2SyncSource | undefined>;
+  readonly executionAssetsV2SyncHandler?: ExecutionSnapshotV2SyncHandler;
   readonly installExecutionAssetBundle: (
     bundle: ExecutionAssetBundle,
   ) => Promise<ExecutorCapabilitySnapshot>;
@@ -338,11 +346,18 @@ export interface AuthorityRuntimeStack {
   readonly acceptExecutorSnapshot: (
     snapshot: ExecutorCapabilitySnapshot,
   ) => Promise<void>;
+  readonly refreshLocalExecutorSnapshot: (
+    permissionSnapshotHighWater?: number,
+  ) => Promise<{
+    readonly snapshot: ExecutorCapabilitySnapshot;
+    readonly deviceDigest: string;
+  }>;
   readonly synchronizeExecutorBaseline?: (target: {
     readonly executorId: string;
     readonly synchronizePermission: (
       snapshot: TrustRuleSnapshot,
-      executionAssets?: ExecutionAssetBundle,
+      executionAssets?: import("./serve/execution-snapshot-mesh.js").ExecutionAssetBundleProvider,
+      executionAssetsV2?: ExecutionAssetV2SyncSource,
     ) => Promise<ExecutorCapabilitySnapshot>;
   }) => Promise<ExecutorCapabilitySnapshot>;
   readonly reconcileTrustedDevices: (
@@ -356,13 +371,15 @@ export interface AuthorityRuntimeStack {
     readonly environment?: ExplicitEnvironmentSelection;
     readonly modelSelection?: CrossDeviceModelSelectionIntent;
     readonly allowLegacyV1FollowRole?: boolean;
+    readonly requiresV2InputSources?: boolean;
     readonly recentExecutorId?: string;
     readonly targets?: readonly {
       readonly executorId: string;
       readonly deviceId: string;
       readonly synchronizePermission: (
         snapshot: TrustRuleSnapshot,
-        executionAssets?: ExecutionAssetBundle,
+        executionAssets?: import("./serve/execution-snapshot-mesh.js").ExecutionAssetBundleProvider,
+        executionAssetsV2?: ExecutionAssetV2SyncSource,
       ) => Promise<ExecutorCapabilitySnapshot>;
     }[];
   }) => Promise<PreparedConversationAssignmentAuthority>;
@@ -373,6 +390,7 @@ export interface AuthorityRuntimeStack {
     readonly environment?: ExplicitEnvironmentSelection;
     readonly modelSelection?: CrossDeviceModelSelectionIntent;
     readonly allowLegacyV1FollowRole?: boolean;
+    readonly requiresV2InputSources?: boolean;
   }) => Promise<PreparedConversationAssignmentAuthority>;
   readonly prepareJobAssignment: (input: {
     readonly instruction: JobExecutionInstruction;
@@ -395,7 +413,8 @@ export interface AuthorityRuntimeStack {
       readonly deviceId: string;
       readonly synchronizePermission: (
         snapshot: TrustRuleSnapshot,
-        executionAssets?: ExecutionAssetBundle,
+        executionAssets?: import("./serve/execution-snapshot-mesh.js").ExecutionAssetBundleProvider,
+        executionAssetsV2?: ExecutionAssetV2SyncSource,
       ) => Promise<ExecutorCapabilitySnapshot>;
     }[];
   }) => Promise<{
@@ -447,6 +466,7 @@ export interface PreparedConversationAssignmentAuthority {
   readonly policy: ConversationAssignmentCredentialPolicy;
   readonly binding: ConversationRuntimeBinding;
   readonly environment: EnvironmentRequirement;
+  readonly supportsCrossDeviceV2?: boolean;
 }
 
 export interface DeliveryStack {
@@ -556,6 +576,7 @@ export interface SetupAuthorityRuntimeOptions {
     readonly profile: RuntimeExecutionProfile;
     readonly ownerDeviceId: string;
     readonly executorDeviceId: string;
+    readonly supportsCrossDeviceV2?: boolean;
     readonly capabilities: { readonly tools: readonly string[]; readonly mcpServers: readonly string[] };
   }) => RuntimeExecutionProfile;
   readonly enableAnchor?: boolean;
@@ -632,11 +653,14 @@ export async function setupAuthorityRuntime(
   const skillCatalogEvents = new SkillCatalogChangeRelay({
     onListenerError: (error) => recordSkillCatalogObservationFailure(options.records, "listener", error),
   });
+  let stopSkillCatalogObserver: (() => void) | undefined;
   let rubricGlobalState: AnchorRubricGlobalStateAdapter | undefined;
   let schedulerGlobalState: GlobalStatePort | undefined;
   let workspaceBindings: WorkspaceBindingCatalog | undefined;
   let workspaceProbe: WorkspaceProbeHandler | undefined;
   const stopStorageMaintenance = async () => {
+    stopSkillCatalogObserver?.();
+    stopSkillCatalogObserver = undefined;
     await workspaceProbe?.stopRetentionMaintenance();
     await surfaceAssets?.stopStorageMaintenance();
     await worksceneGlobalState?.stop();
@@ -987,10 +1011,12 @@ export async function setupAuthorityRuntime(
       // 各步只加观测阶段，不改顺序与失败语义。
       const phase = <T>(name: string, work: () => Promise<T>) => observeLogPhase(options.phaseRecords, `executor-snapshot.${name}`, work);
       const executionAssetSnapshot = await phase("assets", () => executionAssets.current().catch(() => undefined));
+      const executionAssetV2Snapshot = await phase("assets-v2", () => executionAssets.currentV2().catch(() => undefined));
       const inventoryDigest = protocolDigest("LocalTransitionInventory", 1, {
         deviceDigest,
         permissionSnapshotHighWater,
         executionAssetDigest: executionAssetSnapshot?.digest ?? null,
+        ...(executionAssetV2Snapshot ? { executionAssetV2Digest: executionAssetV2Snapshot.digest } : {}),
       });
       const versionResolution = await phase("version", () => versionStore.synchronize(
         executorId,
@@ -1025,6 +1051,10 @@ export async function setupAuthorityRuntime(
         },
         key,
       );
+      const effectiveAssetRevision =
+        executionAssetV2Snapshot?.snapshotRevision ??
+        executionAssetSnapshot?.snapshotRevision ??
+        FileExecutionAssetCache.emptyRevision();
       const inventory = createSignedExecutorVersionInventory(
         {
           executorId,
@@ -1036,15 +1066,9 @@ export async function setupAuthorityRuntime(
             policyRev: capabilityRevision,
           },
           assetVersions: {
-            skillsRev:
-              executionAssetSnapshot?.snapshotRevision ??
-              FileExecutionAssetCache.emptyRevision(),
-            rubricsRev:
-              executionAssetSnapshot?.snapshotRevision ??
-              FileExecutionAssetCache.emptyRevision(),
-            promptAssetsRev:
-              executionAssetSnapshot?.snapshotRevision ??
-              FileExecutionAssetCache.emptyRevision(),
+            skillsRev: effectiveAssetRevision,
+            rubricsRev: effectiveAssetRevision,
+            promptAssetsRev: effectiveAssetRevision,
           },
           permissionSnapshotHighWater,
           credentialBindingRevisions: versionedCredentialBindings.map(
@@ -1250,12 +1274,52 @@ export async function setupAuthorityRuntime(
       : undefined;
     phases.enter("authority-workscene-staging");
     await worksceneGlobalState?.initializeStagedPublishing();
+    const executionAssetPublishQueue = new SerialTaskQueue();
+    let routedGlobalState: GlobalStatePort | undefined;
+    const ensurePublishedExecutionAssets = async (): Promise<void> => {
+      if (!anchorEnabled || !routedGlobalState) return;
+      const targetState = routedGlobalState;
+      await executionAssetPublishQueue.run(async () => {
+        await executionAssets.publishFromAuthority({
+          state: targetState,
+          anchorEpoch,
+          signer: key,
+          generatedAt: canonicalTime(clock(), "Execution asset snapshot time"),
+        });
+      });
+    };
+    routedGlobalState = worksceneGlobalState && skillGlobalState && rubricGlobalState
+      ? createGlobalStateRouter(
+          () => worksceneGlobalState!,
+          () => skillGlobalState!,
+          () => schedulerGlobalState,
+          () => rubricGlobalState!,
+          () => ensurePublishedExecutionAssets(),
+          (error) =>
+            recordSkillCatalogObservationFailure(
+              options.records,
+              "observe",
+              error,
+            ),
+        )
+      : undefined;
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
     ): Promise<{
       readonly snapshot: ExecutorCapabilitySnapshot;
       readonly deviceDigest: string;
     }> => {
+      if (anchorEnabled && routedGlobalState) {
+        await ensurePublishedExecutionAssets().catch((error) =>
+          recordSkillCatalogObservationFailure(
+            options.records,
+            "observe",
+            error,
+          ),
+        );
+      } else {
+        await ensurePublishedExecutionAssets();
+      }
       if (workspaceBindings) {
         await observeLogPhase(options.phaseRecords, "executor-snapshot.workspaces", () => workspaceBindings!.capabilitySnapshot());
         return publicationQueue.run(async () => {
@@ -1285,13 +1349,19 @@ export async function setupAuthorityRuntime(
     const plannedAnchorReadinessSnapshot = async (): Promise<PlannedAnchorReadySnapshot> => {
       const extensions = await options.extensionReadiness?.(authorityLog!);
       const assetSnapshot = await executionAssets.current().catch(() => undefined);
+      const assetSnapshotV2 = await executionAssets.currentV2().catch(() => undefined);
       const snapshot = isPlainRecord(options.configurationSnapshot)
         ? options.configurationSnapshot
         : {};
       const ready = createProductionAnchorReadySnapshot({
         configurationSnapshot: options.configurationSnapshot,
-        assetRevision: assetSnapshot?.digest ??
-          protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
+        assetRevision: assetSnapshotV2
+          ? protocolDigest("PlannedAnchorAssetRevisionV2", 1, {
+              v1: assetSnapshot?.digest ?? null,
+              v2: assetSnapshotV2.digest,
+            })
+          : assetSnapshot?.digest ??
+            protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
         credentialRevision: protocolDigest("PlannedAnchorCredentialRevision", 1, {
           generation: typeof snapshot.credentialGeneration === "string"
             ? snapshot.credentialGeneration
@@ -1338,6 +1408,7 @@ export async function setupAuthorityRuntime(
       if (!anchorEnabled) {
         throw new Error("Anchor authority role is not enabled on this device");
       }
+      await ensurePublishedExecutionAssets();
       const permissionPublication = await permissionSnapshots.publishRules({
         rules: options.defaultConversationPermissionRules?.() ?? [],
         signer: key,
@@ -1345,7 +1416,8 @@ export async function setupAuthorityRuntime(
       });
       const synchronized = await target.synchronizePermission(
         permissionPublication.snapshot,
-        await executionAssets.bundle(),
+        () => executionAssets.bundle(),
+        await executionAssets.syncSourceV2(),
       );
       if (synchronized.descriptor.executorId !== target.executorId) {
         throw new TypeError(
@@ -1362,13 +1434,15 @@ export async function setupAuthorityRuntime(
       readonly environment?: ExplicitEnvironmentSelection;
       readonly modelSelection?: CrossDeviceModelSelectionIntent;
       readonly allowLegacyV1FollowRole?: boolean;
+      readonly requiresV2InputSources?: boolean;
       readonly recentExecutorId?: string;
       readonly targets?: readonly {
         readonly executorId: string;
         readonly deviceId: string;
       readonly synchronizePermission: (
         snapshot: TrustRuleSnapshot,
-        executionAssets?: ExecutionAssetBundle,
+        executionAssets?: import("./serve/execution-snapshot-mesh.js").ExecutionAssetBundleProvider,
+        executionAssetsV2?: ExecutionAssetV2SyncSource,
       ) => Promise<ExecutorCapabilitySnapshot>;
       }[];
     }): Promise<PreparedConversationAssignmentAuthority> => {
@@ -1427,6 +1501,7 @@ export async function setupAuthorityRuntime(
           profile: environmentProfile,
           ownerDeviceId: key.deviceId,
           executorDeviceId: target.descriptor.signature.keyId,
+          supportsCrossDeviceV2: executorSupportsCrossDeviceV2(target.descriptor),
           capabilities: target.descriptor,
         }) ?? environmentProfile);
       const permissionPublication = await phase("permission-rules", () => permissionSnapshots.publishRules({
@@ -1494,6 +1569,9 @@ export async function setupAuthorityRuntime(
           },
           binding: { executionProfile, deviceDigest },
           environment: frozenEnvironment,
+          supportsCrossDeviceV2:
+            target.descriptor.executorId === executorId ||
+            executorSupportsCrossDeviceV2(target.descriptor),
         };
       };
       const candidateErrors: Error[] = [];
@@ -1502,18 +1580,21 @@ export async function setupAuthorityRuntime(
         deviceId: string;
         deviceDigest: string;
       }> = [];
-      if (input.targets?.length) await phase("remote-candidates", async () => { for (const candidate of input.targets!) {
-        if (
-          environmentRequirement.workspace &&
-          candidate.deviceId !== environmentRequirement.workspace.deviceId
-        ) {
-          continue;
-        }
-        try {
-          const synchronized = await candidate.synchronizePermission(
-            permissionPublication.snapshot,
-            await executionAssets.bundle(),
-          );
+      const matchingRemoteTargets = (input.targets ?? []).filter(
+        (candidate) =>
+          !environmentRequirement.workspace ||
+          candidate.deviceId === environmentRequirement.workspace.deviceId,
+      );
+      if (matchingRemoteTargets.length > 0) {
+        await ensurePublishedExecutionAssets();
+        const syncSourceV2 = await executionAssets.syncSourceV2();
+        await phase("remote-candidates", async () => { for (const candidate of matchingRemoteTargets) {
+          try {
+            const synchronized = await candidate.synchronizePermission(
+              permissionPublication.snapshot,
+              () => executionAssets.bundle(),
+              syncSourceV2,
+            );
           if (synchronized.descriptor.executorId !== candidate.executorId) {
             throw new TypeError(
               "Synchronized executor snapshot belongs to another executor",
@@ -1525,6 +1606,12 @@ export async function setupAuthorityRuntime(
             throw new Error(
               "Target executor capability snapshot is unavailable",
             );
+          if (
+            input.requiresV2InputSources === true &&
+            !executorSupportsCrossDeviceV2(target.descriptor)
+          ) {
+            throw new Error("Target executor does not support v2 message input sources");
+          }
           const effectiveSelection = resolveEffectiveTargetModelSelection(
             target,
             input.modelSelection,
@@ -1554,6 +1641,7 @@ export async function setupAuthorityRuntime(
           );
         }
       } });
+      }
       if (
         localExecutorEnabled &&
         (!environmentRequirement.workspace ||
@@ -1740,6 +1828,7 @@ export async function setupAuthorityRuntime(
             deviceDigest: publication.deviceDigest,
           },
           environment: frozenEnvironment,
+          supportsCrossDeviceV2: true,
         };
       };
     const prepareJobAssignment: AuthorityRuntimeStack["prepareJobAssignment"] = async (
@@ -1760,23 +1849,28 @@ export async function setupAuthorityRuntime(
         generatedAt: canonicalTime(clock(), "Permission snapshot time"),
       });
       const candidates: ExecutorCapabilitySnapshot[] = [];
-      for (const candidate of input.targets ?? []) {
-        try {
-          const synchronized = await candidate.synchronizePermission(
-            permissionPublication.snapshot,
-            await executionAssets.bundle(),
-          );
-          if (synchronized.descriptor.executorId !== candidate.executorId) {
-            throw new TypeError(
-              "Synchronized executor snapshot belongs to another executor",
+      if (input.targets?.length) {
+        await ensurePublishedExecutionAssets();
+        const syncSourceV2 = await executionAssets.syncSourceV2();
+        for (const candidate of input.targets) {
+          try {
+            const synchronized = await candidate.synchronizePermission(
+              permissionPublication.snapshot,
+              () => executionAssets.bundle(),
+              syncSourceV2,
             );
+            if (synchronized.descriptor.executorId !== candidate.executorId) {
+              throw new TypeError(
+                "Synchronized executor snapshot belongs to another executor",
+              );
+            }
+            await acceptExecutorSnapshot(synchronized);
+            const accepted = executorCapabilities.snapshotFor(candidate.executorId);
+            if (accepted) candidates.push(accepted);
+          } catch {
+            // A disappearing remote candidate is a recoverable capability gap;
+            // another compatible executor may still accept this occurrence.
           }
-          await acceptExecutorSnapshot(synchronized);
-          const accepted = executorCapabilities.snapshotFor(candidate.executorId);
-          if (accepted) candidates.push(accepted);
-        } catch {
-          // A disappearing remote candidate is a recoverable capability gap;
-          // another compatible executor may still accept this occurrence.
         }
       }
       if (localExecutorEnabled) {
@@ -2106,14 +2200,6 @@ export async function setupAuthorityRuntime(
       );
       return result.ok ? undefined : result.error;
     };
-    const routedGlobalState = worksceneGlobalState && skillGlobalState && rubricGlobalState
-      ? createGlobalStateRouter(
-          () => worksceneGlobalState!,
-          () => skillGlobalState!,
-          () => schedulerGlobalState,
-          () => rubricGlobalState!,
-        )
-      : undefined;
     const rebindInstalledAuthority = async (
       generation: InstalledAuthorityGeneration,
     ): Promise<InstalledAuthorityGenerationReceipt> => {
@@ -2266,15 +2352,21 @@ export async function setupAuthorityRuntime(
     };
     phases.enter("authority-execution-assets");
     if (routedGlobalState) {
-      await executionAssets
-        .publishFromAuthority({
-          state: routedGlobalState,
-          anchorEpoch,
-          signer: key,
-          generatedAt: canonicalTime(clock(), "Execution asset snapshot time"),
-        })
-        .catch(() => undefined);
+      await ensurePublishedExecutionAssets();
       if (localExecutorEnabled) await refreshLocalExecutorSnapshot();
+      stopSkillCatalogObserver = skillCatalogEvents.onChanged(() => {
+        void ensurePublishedExecutionAssets()
+          .then(() =>
+            localExecutorEnabled ? refreshLocalExecutorSnapshot() : undefined,
+          )
+          .catch((error) =>
+            recordSkillCatalogObservationFailure(
+              options.records,
+              "observe",
+              error,
+            ),
+          );
+      });
     }
     phases.end();
     return {
@@ -2414,7 +2506,22 @@ export async function setupAuthorityRuntime(
         permissionSnapshots.snapshot(digest),
       latestPermissionSnapshot: () => permissionSnapshots.latest(),
       executionAssetCatalog: executionAssets,
-      currentExecutionAssetBundle: () => executionAssets.bundle(),
+      currentExecutionAssetBundle: async () => {
+        await ensurePublishedExecutionAssets();
+        return executionAssets.bundle();
+      },
+      currentExecutionAssetSyncV2: async () => {
+        await ensurePublishedExecutionAssets();
+        return executionAssets.syncSourceV2();
+      },
+      executionAssetsV2SyncHandler: createExecutionAssetV2SyncHandler({
+        zhixingHome: options.zhixingHome,
+        artifacts,
+        executionAssets,
+        verifier,
+        refreshCapability: currentExecutorSnapshot,
+        runRevisionChange: plannedAnchorReadiness.runRevisionChange,
+      }),
       plannedAnchorReadiness: plannedAnchorReadiness.port,
       commitExtensionDecision: plannedAnchorReadiness.runRevisionChange,
       installExecutionAssetBundle,
@@ -2530,6 +2637,8 @@ function createGlobalStateRouter(
   skills: () => GlobalStatePort,
   scheduler: () => GlobalStatePort | undefined,
   rubrics: () => GlobalStatePort,
+  onSkillMutated?: () => Promise<void>,
+  onSkillMutatedError?: (error: unknown) => void,
 ): GlobalStatePort {
   const routeMutation = (
     mutation: Parameters<GlobalStatePort["mutate"]>[0],
@@ -2551,6 +2660,8 @@ function createGlobalStateRouter(
       if (
         query.kind === "skill-catalog" ||
         query.kind === "skill-get" ||
+        query.kind === "skill-catalog-v2" ||
+        query.kind === "skill-get-v2" ||
         (query.kind === "asset-index" && query.asset === "skills")
       ) {
         return skills().read(query, context);
@@ -2564,16 +2675,23 @@ function createGlobalStateRouter(
       }
       return owner.read(query, context);
     },
-    mutate: ((
+    mutate: (async (
       mutation:
         | import("@zhixing-ai/core/contracts").GlobalControlMutation
         | import("@zhixing-ai/core/contracts").GlobalStagedMutation,
       context: import("@zhixing-ai/core/contracts").AuthorityCallContext,
-    ) =>
-      routeMutation(mutation).mutate(
+    ) => {
+      const result = await routeMutation(mutation).mutate(
         mutation,
         context,
-      )) as GlobalStatePort["mutate"],
+      );
+      if (mutation.kind.startsWith("skill-") && onSkillMutated) {
+        await onSkillMutated().catch((error) => {
+          onSkillMutatedError?.(error);
+        });
+      }
+      return result;
+    }) as GlobalStatePort["mutate"],
   };
 }
 

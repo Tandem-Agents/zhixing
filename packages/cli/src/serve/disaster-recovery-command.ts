@@ -55,6 +55,7 @@ import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js
 import { assertRecoveryPackageInputLimit, requireRecoveryPackageSurface } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { FileExecutionAssetCache } from "./execution-asset-cache.js";
+import { assertReadableSkillEntriesV2 } from "./execution-asset-cache-v2.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import { collectDisasterRecoveryTrustEvidence } from "./disaster-recovery-trust-evidence.js";
 import {
@@ -780,6 +781,17 @@ function productionRecoveryReadiness(context: RecoveryContext) {
       verifier,
     );
     const assetSnapshot = await assets.current();
+    const assetSnapshotV2 = await assets.currentV2();
+    if (assetSnapshotV2) {
+      await assertReadableSkillEntriesV2(assetSnapshotV2.skills, context.store.artifactStore());
+    }
+    const assetRevisionDigest = assetSnapshotV2
+      ? protocolDigest("PlannedAnchorAssetRevisionV2", 1, {
+          v1: assetSnapshot?.digest ?? null,
+          v2: assetSnapshotV2.digest,
+        })
+      : assetSnapshot?.digest ??
+        protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" });
     const credentialRevision = protocolDigest("PlannedAnchorCredentialRevision", 1, {
       generation: credentials.generation,
       providers: Object.keys(credentials.credentials.providers ?? {}).sort(),
@@ -795,8 +807,7 @@ function productionRecoveryReadiness(context: RecoveryContext) {
         executableVersion: ZHIXING_CLI_VERSION,
         credentialGeneration: credentials.generation,
       },
-      assetRevision: assetSnapshot?.digest ??
-        protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
+      assetRevision: assetRevisionDigest,
       credentialRevision,
       anchorEnabled: true,
       executorEnabled: context.configuration.enabledRoles.includes("executor"),

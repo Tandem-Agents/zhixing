@@ -10,7 +10,7 @@ import {
   reportSupersededTrust,
   SupersededTrustGovernance,
 } from "./superseded-trust-report.js";
-import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing-ai/core/conversation";
+import { assertLocalConversationIdForDevice } from "@zhixing-ai/core/conversation";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
   DeviceAdministrationDutyMigrationAdmissionPort,
@@ -72,12 +72,14 @@ import {
   ConversationTransferTarget,
   listCommittedConversationIds,
   listCommittedConversationTransferIds,
-  listConversationTransfersFor,
-  readConversationTransferState,
   type ConversationTransferPublication,
   type ConversationTransferStagingArea,
 } from "@zhixing-ai/owner-kernel/conversation-transfer";
 import { listPendingDeferredIntentConversations } from "@zhixing-ai/owner-kernel/deferred-global-intents";
+import {
+  adoptLocalConversation,
+  assertLocalConversationsDurablyTransferred,
+} from "./local-conversation-transfer-coordinator.js";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -148,7 +150,6 @@ import type {
 } from "./local-conversation-owner.js";
 import {
   ConversationTransferMeshClient,
-  ConversationTransferRejectedError,
   registerConversationTransferMeshService,
 } from "./conversation-transfer-mesh.js";
 import {
@@ -460,8 +461,8 @@ export class MeshConversationExecutorTopologyDirectory
         authorizationFor: async (assignmentId) =>
           this.options.assignmentArtifacts.read(assignmentId),
       }),
-      synchronizePermission: (snapshot, executionAssets) =>
-        snapshots.installPermission(snapshot, executionAssets),
+      synchronizePermission: (snapshot, executionAssets, executionAssetsV2) =>
+        snapshots.installPermission(snapshot, executionAssets, executionAssetsV2),
     } satisfies ConversationExecutorTopologyTarget);
     this.#targets.set(executorId, target);
     return target;
@@ -869,6 +870,7 @@ export class MeshRuntimeAssembly
         },
         (deviceId) => this.#peerHasRole(deviceId, "anchor"),
         options.authority.verifier,
+        options.authority.executionAssetsV2SyncHandler,
       ));
       if (options.authority.workspaceProbe) {
         this.#disposers.push(
@@ -922,6 +924,9 @@ export class MeshRuntimeAssembly
     }
 
     if (this.#transferTarget || options.localConversationOwner) {
+      options.localConversationOwner?.bindTransferTargetCompatibility?.((targetDeviceId) =>
+        this.conversationTransferSupportsV2InputSources(targetDeviceId),
+      );
       this.#disposers.push(
         registerConversationTransferMeshService(this.services, {
           ...(options.localConversationOwner
@@ -1824,20 +1829,12 @@ export class MeshRuntimeAssembly
       throw new Error("Current duty device is unavailable for conversation transfer");
     }
     await this.#adoptLocalConversations(input.targetDeviceId, input.conversationIds);
-    for (const conversationId of input.conversationIds) {
-      // 按会话精确读取它的迁移，不遍历全部迁移
-      const states = await listConversationTransfersFor(
-        this.options.authority.executorLog,
-        this.options.authority.verifier,
-        conversationId,
-      );
-      if (!states.some((state) =>
-        state.identity.conversationId === conversationId &&
-        state.identity.targetDeviceId === input.targetDeviceId &&
-        (state.phase === "committed" || state.phase === "tombstoned"))) {
-        throw new Error("Device removal conversation transfer is not durably complete");
-      }
-    }
+    await assertLocalConversationsDurablyTransferred({
+      executorLog: this.options.authority.executorLog,
+      verifier: this.options.authority.verifier,
+      targetDeviceId: input.targetDeviceId,
+      conversationIds: input.conversationIds,
+    });
   }
 
   async start(options: {
@@ -1949,8 +1946,8 @@ export class MeshRuntimeAssembly
     return (await this.options.executorTopologyDirectory.candidates()).map((target) => ({
       executorId: target.executorId,
       deviceId: target.deviceId,
-      synchronizePermission: (snapshot, executionAssets) =>
-        target.synchronizePermission(snapshot, executionAssets),
+      synchronizePermission: (snapshot, executionAssets, executionAssetsV2) =>
+        target.synchronizePermission(snapshot, executionAssets, executionAssetsV2),
     }));
   }
 
@@ -2604,8 +2601,8 @@ export class MeshRuntimeAssembly
     );
     await this.options.authority.synchronizeExecutorBaseline({
       executorId: executorIdForDevice(peerDeviceId),
-      synchronizePermission: (snapshot, executionAssets) =>
-        snapshots.installPermission(snapshot, executionAssets),
+      synchronizePermission: (snapshot, executionAssets, executionAssetsV2) =>
+        snapshots.installPermission(snapshot, executionAssets, executionAssetsV2),
     });
   }
 
@@ -2635,6 +2632,19 @@ export class MeshRuntimeAssembly
     await lifecycle.review.reviewAfterAdoption(base.manifest.conversationId);
   }
 
+  async conversationTransferSupportsV2InputSources(
+    targetDeviceId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (targetDeviceId === this.options.authority.deviceId) return true;
+    const client = new ConversationTransferMeshClient(
+      this.connections.client(targetDeviceId),
+      this.options.authority.signer,
+      this.options.authority.verifier,
+    );
+    return await client.supportsV2InputSources(signal);
+  }
+
   async #adoptLocalConversations(
     peerDeviceId: string,
     exactCandidates?: readonly string[],
@@ -2655,85 +2665,15 @@ export class MeshRuntimeAssembly
       this.options.authority.verifier,
     );
     for (const conversationId of exactCandidates ?? await owner.transferCandidates()) {
-      const parsed = parseLocalConversationId(conversationId);
-      if (!parsed) continue;
-      // 按会话精确读取它的迁移（与原先全量列表同序），不遍历全部迁移
-      const states = await listConversationTransfersFor(
-        this.options.authority.executorLog,
-        this.options.authority.verifier,
+      await adoptLocalConversation({
         conversationId,
-      );
-      const prior = states.find((state) =>
-        state.identity.conversationId === conversationId &&
-        state.identity.targetDeviceId === peerDeviceId &&
-        state.phase !== "aborted"
-      );
-      if (prior?.phase === "committed" || prior?.phase === "tombstoned") continue;
-      const transferId = prior?.identity.transferId ?? `xfer-${parsed.ulid}`;
-      const requestId = prior?.identity.requestId ?? `adopt:${conversationId}`;
-      const prepared = {
-        v: 1 as const,
-        t: "prepared" as const,
-        requestId,
-        transferId,
-        sourceDeviceId: identity.deviceId,
         targetDeviceId: peerDeviceId,
-        conversationId,
-        sourceOwnerEpoch: identity.ownerEpoch,
-        nextOwnerEpoch: identity.ownerEpoch + 1,
-      };
-      try {
-        const resumedTarget = prior ? await client.status(transferId).catch(() => undefined) : undefined;
-        if (resumedTarget?.state === "committed" || resumedTarget?.state === "tombstoned") {
-          if (!resumedTarget.commit) {
-            throw new Error("Committed transfer recovery is incomplete");
-          }
-          const frozen = await source.freeze(transferId);
-          await source.acceptCommit({ manifest: frozen.manifest, commit: resumedTarget.commit });
-          continue;
-        }
-        if (resumedTarget?.state === "aborted") {
-          await source.acceptAbort(resumedTarget.abort);
-          continue;
-        }
-        if (!prior) {
-          await client.prepare(prepared);
-          await source.prepare({
-            requestId,
-            transferId,
-            targetDeviceId: peerDeviceId,
-            conversationId,
-            sourceOwnerEpoch: identity.ownerEpoch,
-          });
-        }
-        const frozen = await source.freeze(transferId);
-        const commit = await client.importAndCommit(frozen);
-        await source.acceptCommit({ manifest: frozen.manifest, commit });
-      } catch (error) {
-        const durable = await readConversationTransferState(
-          this.options.authority.executorLog,
-          transferId,
-          this.options.authority.verifier,
-        );
-        if (!durable) continue;
-        const target = await client.status(transferId).catch(() => undefined);
-        if (target?.state === "committed" || target?.state === "tombstoned") {
-          if (!target.commit || !durable.manifest) throw new Error("Committed transfer recovery is incomplete");
-          const manifest = await source.freeze(transferId);
-          await source.acceptCommit({ manifest: manifest.manifest, commit: target.commit });
-          continue;
-        }
-        if (target?.state === "aborted") {
-          await source.acceptAbort(target.abort);
-          continue;
-        }
-        if (!(error instanceof ConversationTransferRejectedError) || error.retryable) {
-          throw error;
-        }
-        const abort = await source.prepareAbort(transferId, "target-rejected");
-        const acknowledged = await client.abort(abort);
-        await source.acceptAbort(acknowledged);
-      }
+        identity,
+        source,
+        client,
+        executorLog: this.options.authority.executorLog,
+        verifier: this.options.authority.verifier,
+      });
     }
   }
 

@@ -41,7 +41,7 @@ it("instantiates the exact signed profile when new tools appear before execution
     releasePreflightEnvironment: () => {},
     onError: (_id: string, error: Error) => { errors.push(error.message); },
   } as never);
-  worker.accept({ execution: "conversation", assignmentId: "probe", capabilities: [globalAuthorityCapability("probe", "ws:reports:primary")], manifest: { tools: ["mcp_discover"], mcpServers: [], environment: { deviceId: "remote" } }, work: { conversationId: "ws:reports:primary", controlContext: [], windowInput: { t: "full", messages: [] }, ingress: { kind: "first-party" } } } as never);
+  worker.accept({ execution: "conversation", assignmentId: "probe", capabilities: [globalAuthorityCapability("probe", "ws:reports:primary")], resourceLease: { reservationId: "res-probe", expiry: new Date(Date.now() + 60_000).toISOString(), budget: { maxTokens: 10_000, maxCalls: 10 } }, manifest: { tools: ["mcp_discover"], mcpServers: [], environment: { deviceId: "remote" } }, work: { conversationId: "ws:reports:primary", controlContext: [], windowInput: { t: "full", messages: [] }, ingress: { kind: "first-party" } } } as never);
   await worker.drain();
   expect(create.mock.calls[0]?.[1]).toEqual({ workspaceRoot: "D:\\fixture", executionProfile: { tools: ["mcp_discover"], mcpServers: [], providerIds: [] }, workspaceBinding: null });
   expect(errors).toEqual(["RUN_REACHED"]);
@@ -74,6 +74,7 @@ it.each(["ready", "unavailable", "missing"] as const)("hands the adjudicated adv
     onError: (_id: string, error: Error) => { errors.push(error.message); },
   } as never);
   worker.accept({ execution: "conversation", assignmentId: `material-${status}`, capabilities: [globalAuthorityCapability(`material-${status}`, "conv-1")],
+    resourceLease: { reservationId: `res-material-${status}`, expiry: new Date(Date.now() + 60_000).toISOString(), budget: { maxTokens: 10_000, maxCalls: 10 } },
     manifest: { tools: [], mcpServers: [], environment: { deviceId: "remote" } },
     work: { conversationId: "conv-1", controlContext: status === "missing" ? [] : [{ source: "advancement-execution", block: JSON.stringify(material) }], windowInput: { t: "full", messages: [] },
       ingress: { kind: "first-party", ingressId: "turn-1:direct", turnOrigin: origin } } } as never);
@@ -548,7 +549,11 @@ describe("ConversationAssignmentWorker", () => {
       manifest: { tools: [], mcpServers: [], environment: {} },
       capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
-      resourceLease: {},
+      resourceLease: {
+        reservationId: "res-worker-cancel",
+        expiry: new Date(Date.now() + 60_000).toISOString(),
+        budget: { maxTokens: 10_000, maxCalls: 10 },
+      },
       work: {
         conversationId,
         runId: "run-worker-cancel",
@@ -835,7 +840,11 @@ describe("ConversationAssignmentWorker", () => {
       manifest: { tools: [], mcpServers: [], environment: {} },
       capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
-      resourceLease: {},
+      resourceLease: {
+        reservationId: "res-worker-ticket-answer",
+        expiry: new Date(Date.now() + 60_000).toISOString(),
+        budget: { maxTokens: 10_000, maxCalls: 10 },
+      },
       work: {
         conversationId,
         runId: "run-worker-ticket-answer",
@@ -1079,7 +1088,11 @@ describe("ConversationAssignmentWorker", () => {
       manifest: { tools: [], mcpServers: [], environment: {} },
       capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
-      resourceLease: {},
+      resourceLease: {
+        reservationId: "res-turn-origin",
+        expiry: new Date(Date.now() + 60_000).toISOString(),
+        budget: { maxTokens: 10_000, maxCalls: 10 },
+      },
       work: {
         conversationId,
         runId: "run-turn-origin",
@@ -1226,6 +1239,327 @@ describe("ConversationAssignmentWorker", () => {
       expect(submitBundle).not.toHaveBeenCalled();
       expect(onError).toHaveBeenCalledWith(assignmentId, expect.objectContaining({ message: `seal fault: ${fault}` }));
       expect((await createStream.mock.results[0]!.value).markTerminal).toHaveBeenCalledTimes(fault === "before-seal" ? 1 : 0);
+    }
+  });
+
+  it("keeps channel source fidelity internally while projecting v1 stream events and runRecord for unnegotiated legacy anchors", async () => {
+    for (const scenario of ["legacy-channel", "legacy-user", "v2-channel"] as const) {
+      const assignmentId = `asg-${scenario}`;
+      const conversationId = `conv-${scenario}`;
+      const isV2 = scenario === "v2-channel";
+      const isUser = scenario === "legacy-user";
+      const userMessage = isUser
+        ? {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "hello v1 user" }],
+            inputIdentity: { id: "id-user-1", source: { kind: "user" as const } },
+          }
+        : {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "hello feishu" }],
+            ...(isV2
+              ? { inputIdentity: { id: "ing-ch-v2", source: { kind: "channel" as const, channelId: "feishu" } } }
+              : {}),
+          };
+      const turnOrigin = isV2
+        ? {
+            channel: "feishu",
+            target: { channelId: "feishu", to: "u1" },
+            messageIdentity: { id: "ing-ch-v2", source: { kind: "channel" as const, channelId: "feishu" } },
+          }
+        : isUser
+          ? { channel: "cli" }
+          : { channel: "feishu", target: { channelId: "feishu", to: "u1" }, triggeredBy: "m1" };
+      const ingress = isUser
+        ? {
+            kind: "first-party" as const,
+            surfacePrincipal: "cli:local",
+            ingressId: "ing-u1",
+            receivedAt: new Date().toISOString(),
+            turnOrigin,
+          }
+        : {
+            kind: "channel" as const,
+            surfacePrincipal: "channel:feishu:u1",
+            ingressId: isV2 ? "ing-ch-v2" : "ing-ch-v1",
+            receivedAt: new Date().toISOString(),
+            responder: { channelId: "feishu", platformSubject: "u1" },
+            replyTarget: { channelId: "feishu", to: "u1" },
+            turnOrigin,
+          };
+      const envelope = {
+        execution: "conversation",
+        assignmentId,
+        manifest: {
+          tools: isV2 ? ["skill_read"] : ["load_skill", "read"],
+          mcpServers: [],
+          environment: {},
+        },
+        capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
+        permissionLease: {},
+        resourceLease: { reservationId: `res-${scenario}`, budget: { maxTokens: 10_000, maxCalls: 10 } },
+        work: {
+          conversationId,
+          runId: `run-${scenario}`,
+          controlContext: [],
+          ownerEpoch: 1,
+          baseRevision: 1,
+          ingress,
+          contentAssets: [],
+          windowInput: { t: "full", windowEpoch: 1, messages: [userMessage] },
+        },
+      } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+
+      let runtimeMessages: unknown[] = [];
+      const appendedFrames: Array<{ payload: unknown; meta?: StreamFrameMeta }> = [];
+      const streamChain = new StreamDigestChain(assignmentId);
+      const sealedBundles: Array<{ runRecord?: { messages?: Array<{ inputIdentity?: unknown }> } }> = [];
+      const submitBundle = vi.fn(async () => ({ committed: true, commitRevision: 2 }));
+      const worker = new ConversationAssignmentWorker({
+        InProcessAssignmentSubmission,
+        ledger: {
+          sealedBundleForRecovery: vi.fn(async () => ({ kind: "not-sealed" as const })),
+          start: vi.fn(async () => ({ started: true })),
+          authorizeToolExecution: vi.fn(),
+          closePendingInteractionsForRunEnd: vi.fn(async () => 0),
+          pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+          hasPendingTicketCancellation: vi.fn(async () => false),
+          hasPendingOwnerCancellation: vi.fn(async () => false),
+          sealConversationBundle: vi.fn(async (_id, input) => {
+            sealedBundles.push(input);
+            return { assignmentId, body: input } as unknown as SealedBundle;
+          }),
+          failExecution: vi.fn(async () => undefined),
+          acknowledge: vi.fn(async () => undefined),
+          openExecutionScope: () => ({ close() {} }),
+        } as unknown as ConversationAssignmentLedger,
+        runtimeFactory: {
+          create: vi.fn(async (_id, environment) => ({
+            executionProfile: () => environment?.executionProfile ?? { tools: [], mcpServers: [], providerIds: [] },
+            run: async function* (
+              msgs: Array<{ inputIdentity?: unknown }>,
+              options: { onProtocolEvent: (event: never, meta: { lineage?: string }) => Promise<void> },
+            ) {
+              runtimeMessages = msgs;
+              await options.onProtocolEvent(
+                {
+                  event: "agent:input_received",
+                  payload: {
+                    inputs: msgs.map((m) => ({
+                      text: "msg",
+                      ...(m.inputIdentity ? { identity: m.inputIdentity } : {}),
+                    })),
+                  },
+                } as never,
+                {},
+              );
+              return {
+                agentResult: { reason: "completed", usage: { inputTokens: 1, outputTokens: 1 } },
+                runRecord: {
+                  type: "run",
+                  runId: `run-${scenario}`,
+                  runIndex: 1,
+                  timestamp: new Date().toISOString(),
+                  messages: [...msgs, { role: "assistant", content: [{ type: "text", text: "ok" }] }],
+                },
+              };
+            },
+            dispose: vi.fn(async () => undefined),
+          })),
+        } as unknown as RuntimeFactory,
+        artifacts: {} as ArtifactStore,
+        submissionFor: () => ({
+          reportStarted: vi.fn(async () => undefined),
+          mirrorInteractions: vi.fn(),
+          submitBundle,
+          submitCancelProof: vi.fn(),
+        }),
+        finalizeUsage: vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 })),
+        interactions: interactionObserver(),
+        createStream: vi.fn(async () => ({
+          append: async (payload: Parameters<StreamDigestChain["append"]>[0], meta?: StreamFrameMeta) => {
+            appendedFrames.push({ payload, meta });
+            return streamChain.append(payload, meta);
+          },
+          final: async (meta?: StreamFrameMeta) => streamChain.final(meta),
+          markTerminal: vi.fn(async () => undefined),
+        })),
+      });
+
+      worker.accept(envelope);
+      await worker.drain();
+
+      const runtimeIdentity = (runtimeMessages[0] as { inputIdentity?: { source?: { kind: string } } }).inputIdentity;
+      if (isUser) {
+        expect(runtimeIdentity?.source?.kind).toBe("user");
+      } else {
+        expect(runtimeIdentity?.source?.kind).toBe("channel");
+      }
+      const inputEvent = appendedFrames.find(
+        (f) => (f.payload as { kind?: string; event?: { event?: string } }).event?.event === "agent:input_received",
+      ) as {
+        payload: { event: { payload: { inputs: Array<{ text: string; identity?: { source?: { kind: string } } }> } } };
+        meta?: StreamFrameMeta;
+      };
+      const sealedIdentity = sealedBundles[0]?.runRecord?.messages?.[0]?.inputIdentity as
+        | { source?: { kind: string } }
+        | undefined;
+      if (scenario === "legacy-channel") {
+        expect(inputEvent.payload.event.payload.inputs[0]?.identity).toBeUndefined();
+        expect(inputEvent.meta?.turnOrigin?.messageIdentity).toBeUndefined();
+        expect(sealedIdentity).toBeUndefined();
+      } else if (scenario === "legacy-user") {
+        expect(inputEvent.payload.event.payload.inputs[0]?.identity?.source?.kind).toBe("user");
+        expect(sealedIdentity?.source?.kind).toBe("user");
+      } else {
+        expect(inputEvent.payload.event.payload.inputs[0]?.identity?.source?.kind).toBe("channel");
+        expect(inputEvent.meta?.turnOrigin?.messageIdentity?.source?.kind).toBe("channel");
+        expect(sealedIdentity?.source?.kind).toBe("channel");
+      }
+      expect(submitBundle).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("clamps modelCallResourceMeter and resourceReservation deadlines to resourceLease.expiry", async () => {
+    for (const mode of ["cap-later-than-lease", "cap-earlier-than-lease"] as const) {
+      const now = Date.now();
+      const capExpiry = new Date(now + (mode === "cap-later-than-lease" ? 24 * 60 * 60_000 : 10 * 60_000)).toISOString();
+      const leaseExpiry = new Date(now + 30 * 60_000).toISOString();
+      const expectedDeadline = mode === "cap-later-than-lease" ? leaseExpiry : capExpiry;
+      const assignmentId = `asg-deadline-${mode}`;
+      const conversationId = `conv-deadline-${mode}`;
+      const capability = {
+        ...globalAuthorityCapability(assignmentId, conversationId),
+        expiry: capExpiry,
+      };
+      const envelope = {
+        execution: "conversation",
+        assignmentId,
+        manifest: { tools: ["skill_read"], mcpServers: [], environment: {} },
+        capabilities: [capability],
+        permissionLease: {},
+        resourceLease: {
+          reservationId: `res-${mode}`,
+          expiry: leaseExpiry,
+          budget: { maxTokens: 10_000, maxCalls: 10 },
+        },
+        work: {
+          conversationId,
+          runId: `run-${mode}`,
+          controlContext: [],
+          ownerEpoch: 1,
+          baseRevision: 1,
+          ingress: {
+            kind: "first-party" as const,
+            surfacePrincipal: "cli:local",
+            ingressId: `ing-${mode}`,
+            receivedAt: new Date(now).toISOString(),
+            turnOrigin: { channel: "cli" },
+          },
+          contentAssets: [],
+          windowInput: {
+            t: "full" as const,
+            windowEpoch: 1,
+            messages: [
+              {
+                role: "user" as const,
+                content: [{ type: "text" as const, text: "hello" }],
+                inputIdentity: { id: `id-${mode}`, source: { kind: "user" as const } },
+              },
+            ],
+          },
+        },
+      } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+
+      const reserveUsage = vi.fn(async () => undefined);
+      const consume = vi.fn(async () => undefined);
+      let subCallContextDeadline: string | undefined;
+      const streamChain = new StreamDigestChain(assignmentId);
+      const submitBundle = vi.fn(async () => ({ committed: true, commitRevision: 2 }));
+
+      const worker = new ConversationAssignmentWorker({
+        InProcessAssignmentSubmission,
+        ledger: {
+          sealedBundleForRecovery: vi.fn(async () => ({ kind: "not-sealed" as const })),
+          start: vi.fn(async () => ({ started: true })),
+          authorizeToolExecution: vi.fn(),
+          closePendingInteractionsForRunEnd: vi.fn(async () => 0),
+          pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+          hasPendingTicketCancellation: vi.fn(async () => false),
+          hasPendingOwnerCancellation: vi.fn(async () => false),
+          sealConversationBundle: vi.fn(async (_id, input) => ({ assignmentId, body: input } as unknown as SealedBundle)),
+          failExecution: vi.fn(async () => undefined),
+          acknowledge: vi.fn(async () => undefined),
+          openExecutionScope: () => ({ close() {} }),
+        } as unknown as ConversationAssignmentLedger,
+        runtimeFactory: {
+          create: vi.fn(async (_id, environment) => ({
+            executionProfile: () => environment?.executionProfile ?? { tools: [], mcpServers: [], providerIds: [] },
+            run: async function* (
+              msgs: unknown[],
+              options: {
+                modelCallResourceMeter: {
+                  reserve: (input: { callIndex: number; tokenUpperBound: number }) => Promise<{ usageId: string }>;
+                  consume: (input: { usageId: string; tokens: number }) => Promise<void>;
+                };
+                resourceReservation: {
+                  contextFor: (requestId: string) => { deadlineAt: string };
+                };
+              },
+            ) {
+              const reserved = await options.modelCallResourceMeter.reserve({ callIndex: 1, tokenUpperBound: 100 });
+              await options.modelCallResourceMeter.consume({ usageId: reserved.usageId, tokens: 42 });
+              subCallContextDeadline = options.resourceReservation.contextFor("sub-call").deadlineAt;
+              return {
+                agentResult: { reason: "completed", usage: { inputTokens: 20, outputTokens: 22 } },
+                runRecord: {
+                  type: "run",
+                  runId: `run-${mode}`,
+                  runIndex: 1,
+                  timestamp: new Date(now).toISOString(),
+                  messages: [...msgs, { role: "assistant", content: [{ type: "text", text: "ok" }] }],
+                },
+              };
+            },
+            dispose: vi.fn(async () => undefined),
+          })),
+        } as unknown as RuntimeFactory,
+        artifacts: {} as ArtifactStore,
+        submissionFor: () => ({
+          reportStarted: vi.fn(async () => undefined),
+          mirrorInteractions: vi.fn(),
+          submitBundle,
+          submitCancelProof: vi.fn(),
+        }),
+        finalizeUsage: vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 1 })),
+        resources: {
+          reserveUsage,
+          consume,
+        } as never,
+        interactions: interactionObserver(),
+        createStream: vi.fn(async () => ({
+          append: async (payload: Parameters<StreamDigestChain["append"]>[0], meta?: StreamFrameMeta) =>
+            streamChain.append(payload, meta),
+          final: async (meta?: StreamFrameMeta) => streamChain.final(meta),
+          markTerminal: vi.fn(async () => undefined),
+        })),
+      });
+
+      worker.accept(envelope);
+      await worker.drain();
+
+      expect(submitBundle).toHaveBeenCalledOnce();
+      expect(reserveUsage).toHaveBeenCalledWith(
+        envelope.resourceLease,
+        { usageId: `usage:${assignmentId}:model:1`, tokens: 100, calls: 1 },
+        expect.objectContaining({ deadlineAt: expectedDeadline }),
+      );
+      expect(consume).toHaveBeenCalledWith(
+        envelope.resourceLease,
+        { usageId: `usage:${assignmentId}:model:1`, tokens: 42, calls: 1 },
+        expect.objectContaining({ deadlineAt: expectedDeadline }),
+      );
+      expect(subCallContextDeadline).toBe(expectedDeadline);
     }
   });
 });

@@ -385,7 +385,7 @@ function executorSnapshot(
         revision: 1,
         protocolVersion: "1",
         workspaces: [],
-        tools: [],
+        tools: ["runtime_inspect", "skill_read"],
         mcpServers: [],
         credentialBindings: [],
         evidenceCapabilities: [],

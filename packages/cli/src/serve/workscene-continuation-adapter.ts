@@ -122,6 +122,16 @@ export function createWorksceneContinuationPort(input: {
     },
     admit: async (request) => {
       try {
+        const { messageIdentity: _staleIdentity, ...cleanOrigin } =
+          request.origin ?? {};
+        const turnOrigin: import("@zhixing-ai/core").TurnOrigin = {
+          ...cleanOrigin,
+          channel: cleanOrigin.channel ?? "system",
+          messageIdentity: {
+            id: request.turnId,
+            source: { kind: "system", subsystem: "workscene-continuation" },
+          },
+        };
         const admitted = await manager.admitDurableTurn({
           conversationId: request.conversationId,
           input: request.input,
@@ -139,7 +149,7 @@ export function createWorksceneContinuationPort(input: {
               ? { advancement: request.advancement }
               : {}),
             surfacePrincipal: request.surfacePrincipal,
-            turnContext: { turnId: request.turnId, turnOrigin: request.origin },
+            turnContext: { turnId: request.turnId, turnOrigin },
           },
           surfacePrincipal: request.surfacePrincipal,
         });

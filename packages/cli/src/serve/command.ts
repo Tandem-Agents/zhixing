@@ -26,6 +26,10 @@ import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
 import { createExtensionArtifactReceiver } from "./extension-artifact-receiver-infrastructure.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
+import { createHomeBoundHealthBinding, createRuntimeInspectTool } from "./runtime-inspect-tool.js";
+import { createSystemOnlySkillReadTool } from "@zhixing-ai/tools-builtin";
+import { createBuiltinOnlyAssignmentSkillPorts } from "../runtime/assignment-skill-adapter.js";
+import { listBuiltinSkills, renderSkillIndexV2 } from "@zhixing-ai/core/skills/catalog";
 import { createLogAccess } from "../logging/access.js";
 import { createKernelLogFactory } from "@zhixing-ai/orchestrator/runtime";
 import { MCP_LOG_SOURCE } from "../runtime/mcp-runtime-adapter.js";
@@ -745,12 +749,26 @@ async function runServerProcess(
     mcpRuntime.lifecycle.close(),
   );
   await mcpRuntime.lifecycle.connect();
-  const mcpManagement = createMcpManagementAdapter({ proxy: mcpConfiguration.network?.proxy, readStatusWire: async () => mcpRuntime.status.snapshot() });
+  const mcpManagement = createMcpManagementAdapter({
+    proxy: mcpConfiguration.network?.proxy,
+    readStatusWire: async () => mcpRuntime.status.snapshot(),
+    readStatusV2: async () => mcpRuntime.status.snapshotV2?.() ?? mcpRuntime.status.snapshot(),
+  });
   // Match the explicit home-bound startup input; do not re-resolve process environment here.
   const mcpConfigPath = getGlobalConfigPath({}, zhixingHome);
   const mcpConnection = createMcpConnectionAdapter({ configPath: mcpConfigPath, deviceId: bootstrap.mesh.deviceKey.deviceId, credentials: mcpCredentials, configuredServers: mcpConfiguration.mcp?.servers ?? {}, secretStore: bootstrap.secretStore, runtime: mcpRuntime });
   const mcpApplication = new McpManagementApplication({ discovery: mcpManagement, connection: mcpConnection });
-  const mcpProductTools = createMcpManagementTools(mcpApplication, { deviceId: bootstrap.mesh.deviceKey.deviceId, revision: () => mcpConfigurationRevision({ configPath: mcpConfigPath }) });
+  let pendingMcpConnectionsReader:
+    | ((conversationId: string) => Promise<readonly import("@zhixing-ai/core/mcp-management").McpPendingConnection[]>)
+    | undefined;
+  const mcpProductTools = createMcpManagementTools(mcpApplication, {
+    deviceId: bootstrap.mesh.deviceKey.deviceId,
+    revision: () => mcpConfigurationRevision({ configPath: mcpConfigPath }),
+    readPending: (conversationId) =>
+      pendingMcpConnectionsReader
+        ? pendingMcpConnectionsReader(conversationId)
+        : Promise.resolve(undefined),
+  });
 
   // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
   //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
@@ -768,11 +786,56 @@ async function runServerProcess(
   const extensionHandle = createExtensionManagementHandle();
   const extensionNotifications = createExtensionNotificationHandle();
   const extensionTools = createExtensionTools(extensionHandle.port);
+  let inspectWorkspacesReader:
+    | (() => Promise<readonly { readonly deviceName: string; readonly workspaceName: string }[]>)
+    | undefined;
+  let inspectModelsReader:
+    | ((conversationId: string | undefined) => Promise<{
+        readonly roleSummary: Readonly<Record<import("@zhixing-ai/core").ModelRoleId, import("../runtime/model-runtime-port.js").ModelRolePublicSummary>>;
+        readonly sessionSelectionMode?: string;
+        readonly dispatchSelectionMode?: string;
+      }>)
+    | undefined;
+  const backupTargets = createBackupTargetConfigurationInfrastructure(zhixingHome);
+  const runtimeInspectTool = createRuntimeInspectTool({
+    version: ZHIXING_CLI_VERSION,
+    deviceRoles: () =>
+      bootstrap.mesh.roles.flatMap((role): readonly ("anchor" | "executor")[] =>
+        role === "anchor" || role === "executor" ? [role] : [],
+      ),
+    executionRole: () =>
+      bootstrap.mesh.roles.includes("anchor") && bootstrap.mesh.roles.includes("executor")
+        ? "hybrid"
+        : bootstrap.mesh.roles.includes("anchor")
+          ? "anchor"
+          : "executor",
+    anchorReachable: () => true,
+    mcpServerIds: () => mcpRuntime.tools.snapshot().serverIds,
+    listWorkspaces: () =>
+      inspectWorkspacesReader ? inspectWorkspacesReader() : Promise.resolve([]),
+    readModels: (conversationId) =>
+      inspectModelsReader
+        ? inspectModelsReader(conversationId)
+        : Promise.resolve({ roleSummary: modelRuntimePort.roleSummary() }),
+    healthBinding: createHomeBoundHealthBinding(zhixingHome, backupTargets),
+  });
+  const subAgentSkillIndex = renderSkillIndexV2(
+    listBuiltinSkills("main").map((entry) => ({
+      id: `system:${entry.id}`,
+      description: entry.description,
+      pinned: false as const,
+    })),
+  );
+  const subAgentSupplementalTools = Object.freeze([
+    createSystemOnlySkillReadTool(createBuiltinOnlyAssignmentSkillPorts().loadApplication),
+    runtimeInspectTool,
+  ]);
   const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
     logTools,
     extensionTools,
     communicationTools,
     mcpProductTools,
+    runtimeInspectTool,
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
     scheduler: schedulerFacade,
@@ -877,6 +940,7 @@ async function runServerProcess(
     extensionTools,
     communicationTools,
     mcpProductTools,
+    runtimeInspectTool,
     agentIdentity: resolveAgentIdentity(kernelEnvironmentConfiguration.agent),
     capabilities: anchorRuntimeCapabilities,
     workscenes: worksceneAuthority.tools,
@@ -984,6 +1048,7 @@ async function runServerProcess(
         { conversationId: worksceneConversationId(sceneId, "guidance") },
       );
       if (projection.kind !== "scene" || !projection.workspace) return null;
+      if (projection.workspace.deviceId !== authorityRuntime.deviceId) return null;
       return resolveWorksceneWorkspaceRoot(sceneId, projection.workspace);
     } catch (error) {
       if (error instanceof WorksceneApplicationError && error.kind === "not-found") {
@@ -995,6 +1060,7 @@ async function runServerProcess(
 
   const createConversationAgentRuntime = createWorksceneConversationRuntimeFactory({
     issue: (projection) => runtimeHost.createConversationRuntime(projection),
+    localDeviceId: authorityRuntime.deviceId,
     projections: anchorRuntimeProjections,
     projectConversationRuntime: (query) =>
       projectWorksceneConversationRuntime(worksceneAuthority.runtime, query),
@@ -1180,6 +1246,8 @@ async function runServerProcess(
   // one RuntimeHost/Advancement cycle before any owner starts executing work.
   const runtimeHost = new RuntimeHost({
     createLogRecords: bootstrap.bindLogs ? createKernelLogFactory(bootstrap.bindLogs, MCP_LOG_SOURCE) : undefined,
+    subAgentSupplementalTools,
+    subAgentSkillIndex,
     modelProvider: createHostKernelModelProviderFactory({
       configuration: modelConfiguration,
       credentials: providerCredentials,
@@ -1307,6 +1375,8 @@ async function runServerProcess(
     ? await observeLogPhase(startupRecords, "prepare-channel", () => prepareChannel({
         bindLogs: bootstrap.bindLogs,
         notifyOperation: extensionNotifications.notify,
+        planContinuation: extensionNotifications.planContinuation,
+        deliverContinuation: extensionNotifications.deliverContinuation,
         preparationClosed: extensionNotifications.preparationClosed,
         repairSource: extensionNotifications.repairSource,
         authorityRuntime,
@@ -1504,7 +1574,7 @@ async function runServerProcess(
   boundJobStatus?.onStatus((notice) => executionStatusHub.publish(notice));
   boundDeliveryStack?.onStatus((notice) => executionStatusHub.publish(notice));
   const authorityCheckpointOwner = await observeLogPhase(startupRecords, "create-checkpoint-owner", () => createConfiguredCheckpointOwner({
-    backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
+    backupTargets,
     publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
       zhixingHome,
       storageMaintenance: boundStorageMaintenance,
@@ -3407,6 +3477,28 @@ async function runServerProcess(
     ],
     bootstrap.bindLogs?.(PRODUCT_API_LOG_SOURCE, { scope: "storage" }),
   );
+  inspectWorkspacesReader = async () =>
+    (await worksceneAuthority.tools.workspaceCatalog()).map((entry) => ({
+      deviceName: entry.deviceName,
+      workspaceName: entry.workspaceName,
+    }));
+  inspectModelsReader = async (conversationId) => {
+    const meta = conversationId
+      ? await boundConversationProtocol.sessionState
+          .readSessionMeta(conversationId, {
+            principal: { kind: "host", component: "runtime-inspect-models" },
+            requestId: `runtime-inspect-models:${randomUUID()}`,
+            deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+          })
+          .catch(() => undefined)
+      : undefined;
+    return {
+      roleSummary: modelRuntimePort.roleSummary(),
+      ...(meta?.modelSelection ? { sessionSelectionMode: meta.modelSelection.mode } : {}),
+    };
+  };
+  pendingMcpConnectionsReader = (conversationId) =>
+    conversationServices.worksceneContinuation.pendingMcpConnections(conversationId, bootstrap.mesh.deviceKey.deviceId);
   const hostProgramConversation = createHostProgramConversationApplication({
     anchor: {
       protocol: boundConversationProtocol,
@@ -3577,6 +3669,7 @@ async function runServerProcess(
   communicationHandle.bind(routedCommunication);
   meshRuntime?.bindConversationCommunication(routedCommunication, ownedCommunication);
   extensionNotifications.bind(createExtensionContinuation({ manager: boundConversations!, communication: routedCommunication,
+    localOwner: localExecutor?.owner.port(),
     deviceId: bootstrap.mesh.deviceKey.deviceId,
     fallbackConversation: async () => (await conversationDirectory.exists("default")) ? "default" : undefined,
     isReturnAddressReachable: async (origin: TurnOrigin) => {

@@ -1,4 +1,5 @@
 import type { AgentYield, RunResult } from "@zhixing-ai/core/loop";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
 import { observeLogPhase, type LogRecordPort } from "@zhixing-ai/core/logging";
 import { isWorksceneSupportConversation } from "@zhixing-ai/core/workscene/application";
 import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
@@ -7,7 +8,6 @@ import type {
   AuthorityCallContext,
   DispatchEnvelope,
   DispatchResult,
-  ExecutionAssetBundle,
   ExecutionManifest,
   SealedBundle,
   RunDispatchArguments,
@@ -34,6 +34,8 @@ import {
   InProcessAssignmentSubmission,
 } from "@zhixing-ai/executor";
 import type { ConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
+import type { ExecutionAssetV2SyncSource } from "./execution-asset-cache.js";
+import type { ExecutionAssetBundleProvider } from "./execution-snapshot-mesh.js";
 import type { ConversationRuntimeBinding } from "../setup-delivery.js";
 import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
@@ -61,7 +63,8 @@ export interface ConversationExecutorTopologyTarget {
   readonly executor: RunExecutorPort;
   synchronizePermission(
     snapshot: TrustRuleSnapshot,
-    executionAssets?: ExecutionAssetBundle,
+    executionAssets?: ExecutionAssetBundleProvider,
+    executionAssetsV2?: ExecutionAssetV2SyncSource,
   ): Promise<ExecutorCapabilitySnapshot>;
 }
 
@@ -136,6 +139,7 @@ export interface ConversationExecutorApplicationPlanInput {
     ConversationOwnerRuntimeStack["prepareConversationAssignment"]
   >[0]["modelSelection"];
   readonly allowLegacyV1FollowRole?: boolean;
+  readonly requiresV2InputSources?: boolean;
 }
 
 type PreparedAssignment = Awaited<
@@ -505,21 +509,31 @@ class DefaultConversationExecutorDispatchApplication
     if (candidates.length === 0 && !this.#topology.hasLocal()) {
       throw new Error("No authorized conversation executor is currently available");
     }
+    const effectiveRecentExecutorId =
+      input.recentExecutorId ??
+      (this.#topology.hasLocal() &&
+      !input.environment?.workspace &&
+      parseConversationId(input.conversationId).scope.kind !== "workscene"
+        ? this.#authority.executorId
+        : undefined);
     const assignment = await this.#authority.prepareConversationAssignment({
       conversationId: input.conversationId,
       executionProfile: input.executionProfile,
       permissionRules: input.permissionRules,
-      ...(input.recentExecutorId ? { recentExecutorId: input.recentExecutorId } : {}),
+      ...(effectiveRecentExecutorId ? { recentExecutorId: effectiveRecentExecutorId } : {}),
       ...(input.environment ? { environment: input.environment } : {}),
       ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
       ...(input.allowLegacyV1FollowRole !== undefined
         ? { allowLegacyV1FollowRole: input.allowLegacyV1FollowRole }
         : {}),
+      ...(input.requiresV2InputSources !== undefined
+        ? { requiresV2InputSources: input.requiresV2InputSources }
+        : {}),
       targets: candidates.map((target) => ({
         executorId: target.executorId,
         deviceId: target.deviceId,
-        synchronizePermission: (snapshot, executionAssets) =>
-          target.synchronizePermission(snapshot, executionAssets),
+        synchronizePermission: (snapshot, executionAssets, executionAssetsV2) =>
+          target.synchronizePermission(snapshot, executionAssets, executionAssetsV2),
       })),
     });
     const candidate = assignment.executorId === this.#authority.executorId

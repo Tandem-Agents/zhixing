@@ -31,6 +31,7 @@ import {
   finishAssignmentSideEffect,
   startAssignmentSideEffect,
 } from "./assignment-interaction-projection.js";
+import { encodeRemoteConfirmationWireMeta } from "./remote-first-party-confirmation-broker.js";
 
 export interface DurableInteractionBinding {
   readonly assignmentId: string;
@@ -90,6 +91,10 @@ export class DurableConversationInteractionObserver
   constructor(options: { readonly explicitApprovals?: ExplicitApprovalEffects } = {}) {
     this.#explicitApprovals = options.explicitApprovals;
   }
+
+  currentBroker(): IConfirmationBroker | undefined {
+    return this.#bindings.getStore()?.broker;
+  }
   readonly #projector = new AssignmentInteractionProjector();
   readonly #surfaceAnswers = new Map<
     string,
@@ -117,12 +122,15 @@ export class DurableConversationInteractionObserver
     if (this.#requests.has(request.id)) {
       throw new Error(`Confirmation interaction ${request.id} is already bound`);
     }
+    const wireMetaLine = encodeRemoteConfirmationWireMeta(request);
     const disposition = await active.ledger.requestInteraction(active.assignmentId, {
       requestId: request.id,
       toolName: request.tool,
       display: {
         title: request.display.title,
-        lines: [canonicalize(request.display.body)],
+        lines: wireMetaLine
+          ? [canonicalize(request.display.body), wireMetaLine]
+          : [canonicalize(request.display.body)],
       },
       issuedAt: new Date(request.createdAt).toISOString(),
       ttlMs: Math.max(0, request.expiresAt - request.createdAt),

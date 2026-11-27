@@ -119,6 +119,10 @@
         "requiresAuth": true
       },
       {
+        "name": "mcp.statusV2",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -299,7 +303,15 @@
         "requiresAuth": true
       },
       {
+        "name": "skill.listV2",
+        "requiresAuth": true
+      },
+      {
         "name": "skill.setState",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.setVisibility",
         "requiresAuth": true
       },
       {
@@ -465,6 +477,10 @@
         "requiresAuth": true
       },
       {
+        "name": "mcp.statusV2",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -645,7 +661,15 @@
         "requiresAuth": true
       },
       {
+        "name": "skill.listV2",
+        "requiresAuth": true
+      },
+      {
         "name": "skill.setState",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.setVisibility",
         "requiresAuth": true
       },
       {
@@ -811,6 +835,10 @@
         "requiresAuth": true
       },
       {
+        "name": "mcp.statusV2",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -991,7 +1019,15 @@
         "requiresAuth": true
       },
       {
+        "name": "skill.listV2",
+        "requiresAuth": true
+      },
+      {
         "name": "skill.setState",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.setVisibility",
         "requiresAuth": true
       },
       {
@@ -1157,6 +1193,10 @@
         "requiresAuth": true
       },
       {
+        "name": "mcp.statusV2",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -1337,7 +1377,15 @@
         "requiresAuth": true
       },
       {
+        "name": "skill.listV2",
+        "requiresAuth": true
+      },
+      {
         "name": "skill.setState",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.setVisibility",
         "requiresAuth": true
       },
       {
@@ -1612,6 +1660,7 @@
           "rpc:logs.search",
           "rpc:logs.status",
           "rpc:mcp.pending",
+          "rpc:mcp.statusV2",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1657,7 +1706,9 @@
           "rpc:session.usage",
           "rpc:skill.archive",
           "rpc:skill.list",
+          "rpc:skill.listV2",
           "rpc:skill.setState",
+          "rpc:skill.setVisibility",
           "rpc:trust.list",
           "rpc:trust.revoke",
           "rpc:workscene.create",
@@ -1695,6 +1746,8 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:builtin:skill_admit",
+          "tool:builtin:skill_save",
           "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -1841,6 +1894,7 @@
           "rpc:logs.search",
           "rpc:logs.status",
           "rpc:mcp.pending",
+          "rpc:mcp.statusV2",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1886,7 +1940,9 @@
           "rpc:session.usage",
           "rpc:skill.archive",
           "rpc:skill.list",
+          "rpc:skill.listV2",
           "rpc:skill.setState",
+          "rpc:skill.setVisibility",
           "rpc:trust.list",
           "rpc:trust.revoke",
           "rpc:workscene.create",
@@ -1924,6 +1980,8 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:builtin:skill_admit",
+          "tool:builtin:skill_save",
           "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -2055,6 +2113,7 @@
           "rpc:logs.search",
           "rpc:logs.status",
           "rpc:mcp.pending",
+          "rpc:mcp.statusV2",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -2100,7 +2159,9 @@
           "rpc:session.usage",
           "rpc:skill.archive",
           "rpc:skill.list",
+          "rpc:skill.listV2",
           "rpc:skill.setState",
+          "rpc:skill.setVisibility",
           "rpc:trust.list",
           "rpc:trust.revoke",
           "rpc:workscene.create",
@@ -2256,6 +2317,7 @@
           "rpc:logs.search",
           "rpc:logs.status",
           "rpc:mcp.pending",
+          "rpc:mcp.statusV2",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -2301,7 +2363,9 @@
           "rpc:session.usage",
           "rpc:skill.archive",
           "rpc:skill.list",
+          "rpc:skill.listV2",
           "rpc:skill.setState",
+          "rpc:skill.setVisibility",
           "rpc:trust.list",
           "rpc:trust.revoke",
           "rpc:workscene.create",
@@ -2430,6 +2494,8 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:builtin:skill_admit",
+          "tool:builtin:skill_save",
           "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -2536,6 +2602,8 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:builtin:skill_admit",
+          "tool:builtin:skill_save",
           "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -3947,6 +4015,15 @@
         }
       },
       {
+        "name": "mcp.statusV2",
+        "requiresAuth": true,
+        "key": "rpc:mcp.statusV2",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true,
         "key": "rpc:schedule.abortRun",
@@ -4352,9 +4429,27 @@
         }
       },
       {
+        "name": "skill.listV2",
+        "requiresAuth": true,
+        "key": "rpc:skill.listV2",
+        "category": "rpc",
+        "target": {
+          "rowId": "global-list-read"
+        }
+      },
+      {
         "name": "skill.setState",
         "requiresAuth": true,
         "key": "rpc:skill.setState",
+        "category": "rpc",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "name": "skill.setVisibility",
+        "requiresAuth": true,
+        "key": "rpc:skill.setVisibility",
         "category": "rpc",
         "target": {
           "rowId": "skill-manage"
@@ -4760,6 +4855,22 @@
       {
         "name": "save_skill",
         "key": "tool:builtin:save_skill",
+        "category": "tool",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "name": "skill_admit",
+        "key": "tool:builtin:skill_admit",
+        "category": "tool",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "name": "skill_save",
+        "key": "tool:builtin:skill_save",
         "category": "tool",
         "target": {
           "rowId": "skill-manage"

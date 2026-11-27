@@ -40,6 +40,11 @@ import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
+import { createHomeBoundHealthBinding, createRuntimeInspectTool } from "./runtime-inspect-tool.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
+import { createSystemOnlySkillReadTool, LEGACY_COMPAT_BUILTIN_TOOLS } from "@zhixing-ai/tools-builtin";
+import { createBuiltinOnlyAssignmentSkillPorts } from "../runtime/assignment-skill-adapter.js";
+import { listBuiltinSkills, renderSkillIndexV2 } from "@zhixing-ai/core/skills/catalog";
 import { createLogAccess, createLocalLogProductApi } from "../logging/access.js";
 import { createRuntimeLogTools } from "../logging/tools.js";
 import { createExtensionStatusObserver } from "./extension-continuation.js";
@@ -383,11 +388,53 @@ async function runExecutorProcess(
     let localConversationOwnerRef: LocalConversationOwnerAssembly | undefined;
     const communicationHandle = createConversationCommunicationAssemblyHandle();
     const extensionHandle = createExtensionManagementHandle();
+    const backupTargets = createBackupTargetConfigurationInfrastructure(zhixingHome);
+    const runtimeInspectTool = createRuntimeInspectTool({
+      version: ZHIXING_CLI_VERSION,
+      deviceRoles: () => ["executor"],
+      executionRole: () => "executor",
+      anchorReachable: () => {
+        const anchorId = currentAnchorDeviceId();
+        return Boolean(anchorId && mesh?.connections.has(anchorId));
+      },
+      mcpServerIds: () => mcpRuntime.tools.snapshot().serverIds,
+      readModels: async (conversationId) => {
+        const meta = conversationId && localConversationOwnerRef
+          ? await localConversationOwnerRef.port().sessionState.readSessionMeta(
+              conversationId,
+              {
+                principal: { kind: "host", component: "executor-runtime-inspect-models" },
+                requestId: `executor-inspect-models:${Date.now()}`,
+                deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+              },
+            ).catch(() => undefined)
+          : undefined;
+        return {
+          roleSummary: modelRuntimePort.roleSummary(),
+          ...(meta?.modelSelection ? { sessionSelectionMode: meta.modelSelection.mode } : {}),
+        };
+      },
+      healthBinding: createHomeBoundHealthBinding(zhixingHome, backupTargets),
+    });
+    const subAgentSkillIndex = renderSkillIndexV2(
+      listBuiltinSkills("main").map((entry) => ({
+        id: `system:${entry.id}`,
+        description: entry.description,
+        pinned: false as const,
+      })),
+    );
+    const subAgentSupplementalTools = Object.freeze([
+      createSystemOnlySkillReadTool(createBuiltinOnlyAssignmentSkillPorts().loadApplication),
+      runtimeInspectTool,
+    ]);
     const runtime = new ExecutorRuntimeSubstrate({
       createLogRecords: bootstrap.bindLogs ? createKernelLogFactory(bootstrap.bindLogs, MCP_LOG_SOURCE) : undefined,
       logTools: createRuntimeLogTools(() => logApi),
       extensionTools: createExtensionTools(extensionHandle.port),
       communicationTools: [createConversationTool(communicationHandle.port)],
+      runtimeInspectTool,
+      subAgentSupplementalTools,
+      subAgentSkillIndex,
       zhixingHome,
       modelConfiguration,
       kernelEnvironmentConfiguration,
@@ -408,7 +455,21 @@ async function runExecutorProcess(
       createToolImplementation: bootstrap.createToolImplementation,
       permissionStorage: permissionStorage.runtime,
       mcpTools: mcpRuntime.tools,
-      mcpProductTools: createMcpManagementTools(new McpManagementApplication({ discovery: createMcpManagementAdapter({ proxy: mcpConfiguration.network?.proxy, readStatusWire: async () => mcpRuntime.status.snapshot() }) }), { deviceId: bootstrap.mesh.deviceKey.deviceId, revision: mcpConfigurationRevision, canConnect: false }),
+      mcpProductTools: createMcpManagementTools(
+        new McpManagementApplication({
+          discovery: createMcpManagementAdapter({
+            proxy: mcpConfiguration.network?.proxy,
+            readStatusWire: async () => mcpRuntime.status.snapshot(),
+            readStatusV2: async () => mcpRuntime.status.snapshotV2?.() ?? mcpRuntime.status.snapshot(),
+          }),
+        }),
+        {
+          deviceId: bootstrap.mesh.deviceKey.deviceId,
+          revision: mcpConfigurationRevision,
+          canConnect: false,
+          pendingSupportedOnDevice: false,
+        },
+      ),
       systemProtectedPaths: resolveSystemProtectedSecretPaths(zhixingHome),
       interactions,
       artifactStore: () => {
@@ -1291,6 +1352,9 @@ export class ExecutorRuntimeSubstrate {
     readonly communicationTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
     readonly extensionTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
     readonly logTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
+    readonly runtimeInspectTool?: import("@zhixing-ai/core").ToolDefinition;
+    readonly subAgentSupplementalTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
+    readonly subAgentSkillIndex?: string | null;
     readonly zhixingHome: string;
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
@@ -1380,7 +1444,21 @@ export class ExecutorRuntimeSubstrate {
           ? await this.options.readLocalSessionModelSelection(sessionId).catch(() => undefined)
           : undefined;
     const artifacts = this.options.artifactStore();
-    const profile = workscene?.profile ?? zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null });
+    const baseProfile = workscene?.profile ?? zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null });
+    const legacyV1Only = Boolean(
+      executionProfile?.tools.includes("load_skill") && !executionProfile.tools.includes("skill_read"),
+    );
+    const eligibleProfileTools = [...new Set([
+      ...baseProfile.enabledTools,
+      ...LEGACY_COMPAT_BUILTIN_TOOLS,
+    ])];
+    const resolvedProfile = executionProfile
+      ? {
+          ...baseProfile,
+          enabledTools: eligibleProfileTools.filter(name => executionProfile.tools.includes(name)),
+        }
+      : baseProfile;
+    const isLocalConv = Boolean(sessionId && isLocalConversationId(sessionId));
     return createAgentRuntime({
       deviceCapacity: this.options.deviceCapacity.interactive,
       createLogRecords: this.options.createLogRecords,
@@ -1398,13 +1476,14 @@ export class ExecutorRuntimeSubstrate {
       })),
       windowPrompt: createSkillCatalogWindowPromptProjection(
         workscene ? "work" : "main",
+        ...(legacyV1Only ? [{ legacyV1Only: true }] : []),
       ),
       securityExecution: this.options.permissionStorage.bind(
         workscene
           ? Object.freeze({ sceneId: workscene.sceneId })
           : Object.freeze(workspaceBinding ? { workspace: workspaceBinding } : {}),
       ),
-      profile: executionProfile ? { ...profile, enabledTools: profile.enabledTools.filter(name => executionProfile.tools.includes(name)) } : profile,
+      profile: resolvedProfile,
       lifecycle: [createZhixingGuidanceLifecycle({
         zhixingHome: this.options.zhixingHome,
         readGuidanceFile,
@@ -1415,15 +1494,22 @@ export class ExecutorRuntimeSubstrate {
           ...(this.options.communicationTools ?? []),
           ...(this.options.extensionTools ?? []),
           ...(this.options.mcpProductTools ?? []),
+          ...(this.options.runtimeInspectTool ? [this.options.runtimeInspectTool] : []),
           ...mcp.tools,
-          ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools(createWorksceneRunToolApplication())),
+          ...(isLocalConv ? [] : createWorksceneTaskTools(createWorksceneRunToolApplication())),
           // 推进提议常驻会话运行时；只有宿主发送路径判定为新任务作用域的运行才启用
-          ...(sessionId && isLocalConversationId(sessionId) ? [] : [createAdvancementProposalTool()]),
-        ...(sessionId && isLocalConversationId(sessionId) ? [] : workscene
+          ...(isLocalConv ? [] : [createAdvancementProposalTool()]),
+        ...(isLocalConv ? [] : workscene
           ? [createWorkmodeExitTool(createWorksceneRunToolApplication())]
-          : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication(), createWorksceneRunToolApplication()), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
+          : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication(), createWorksceneRunToolApplication(), { workspaceDirectoryHint: "none" }), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
       ].filter((tool) => !executionProfile || executionProfile.tools.includes(tool.name)),
       executionMcpServers: mcp.serverIds.filter((id) => !executionProfile || executionProfile.mcpServers.includes(id)),
+      ...(this.options.subAgentSupplementalTools
+        ? { subAgentSupplementalTools: this.options.subAgentSupplementalTools }
+        : {}),
+      ...(this.options.subAgentSkillIndex !== undefined
+        ? { subAgentSkillIndex: this.options.subAgentSkillIndex }
+        : {}),
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
@@ -1444,12 +1530,29 @@ export class ExecutorRuntimeSubstrate {
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const runtimeEnvironment = this.#runtimeEnvironment.create({});
-    const baseProfile = zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity });
+    const baseProfile = zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: Boolean(workspaceBinding) });
+    const jobExcludedSkills = new Set(["skill_save", "skill_admit", "save_skill", "admit_skill"]);
+    const filteredBaseProfile = {
+      ...baseProfile,
+      enabledTools: baseProfile.enabledTools.filter(
+        (name) => !jobExcludedSkills.has(name) || capabilities.tools.includes(name),
+      ),
+    };
+    const isLegacyV1Job =
+      capabilities.tools.includes("load_skill") && !capabilities.tools.includes("skill_read");
     const selection = selectJobRuntimeTools({
       instruction,
       capabilities,
-      baseProfile,
-      extraTools: [...(this.options.logTools ?? []), ...(this.options.mcpProductTools ?? []).filter((tool) => !["mcp_connect", "mcp_delegate"].includes(tool.name)), ...mcp.tools],
+      baseProfile: filteredBaseProfile,
+      extraTools: [
+        ...(this.options.logTools ?? []),
+        ...(this.options.mcpProductTools ?? []).filter((tool) => !["mcp_connect", "mcp_delegate"].includes(tool.name)),
+        ...(this.options.runtimeInspectTool ? [this.options.runtimeInspectTool] : []),
+        ...(workspaceBinding
+          ? (this.options.extensionTools ?? []).filter((tool) => tool.name === "extension_validate")
+          : []),
+        ...mcp.tools,
+      ],
       executionMcpServers: mcp.serverIds,
       implementation: this.options.createToolImplementation(Object.freeze({
         kind: "assignment",
@@ -1500,12 +1603,18 @@ export class ExecutorRuntimeSubstrate {
         }),
         runtimeEnvironment,
         toolImplementation: selection.runtimeTools.implementation,
-        windowPrompt: createSkillCatalogWindowPromptProjection("main"),
+        windowPrompt: createSkillCatalogWindowPromptProjection("main", isLegacyV1Job ? { legacyV1Only: true } : {}),
         securityExecution: this.options.permissionStorage.bind(
           jobRunTrustScopeInput({ workspace: workspaceBinding }),
         ),
         profile: selection.profile,
         extraTools: [...selection.runtimeTools.extraTools],
+        ...(this.options.subAgentSupplementalTools
+          ? { subAgentSupplementalTools: this.options.subAgentSupplementalTools }
+          : {}),
+        ...(this.options.subAgentSkillIndex !== undefined
+          ? { subAgentSkillIndex: this.options.subAgentSkillIndex }
+          : {}),
         executionMcpServers: selection.runtimeTools.executionMcpServers,
         confirmationBroker,
         systemProtectedPaths: this.options.systemProtectedPaths,
@@ -1527,6 +1636,7 @@ export class ExecutorRuntimeSubstrate {
           ...(this.options.communicationTools ?? []).map(tool => tool.name),
           ...(this.options.extensionTools ?? []).map(tool => tool.name),
           ...(this.options.mcpProductTools ?? []).map((tool) => tool.name),
+          ...(this.options.runtimeInspectTool ? [this.options.runtimeInspectTool.name] : []),
           ...zhixingProfile().enabledTools,
           ...mcp.tools.map((tool) => tool.name),
           WORKSCENE_PRODUCT_TOOL_IDS.enter,
@@ -1541,7 +1651,37 @@ export class ExecutorRuntimeSubstrate {
   }
 }
 
+export { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
 export { ExecutorJobOwnerLifecycle } from "./executor-job-owner.js";
+export { FileExecutionAssetCache } from "./execution-asset-cache.js";
+export {
+  MeshExecutionSnapshotClient,
+  registerExecutionSnapshotMeshService,
+} from "./execution-snapshot-mesh.js";
+export {
+  createExecutionAssetV2SyncHandler,
+  MAX_EXECUTION_ASSET_CHUNK_BYTES,
+} from "./execution-snapshot-v2-sync.js";
+export {
+  ConversationTransferMeshClient,
+  ConversationTransferRejectedError,
+  registerConversationTransferMeshService,
+} from "./conversation-transfer-mesh.js";
+export { deriveLocalConversationTransferAttemptIdentity } from "./local-conversation-transfer-identity.js";
+export {
+  adoptLocalConversation,
+  queryTransferTargetStatusIfKnown,
+} from "./local-conversation-transfer-coordinator.js";
+export { createInboundChannelRouter, setupChannels } from "./channels.js";
+export { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
+export { setupDelivery } from "../setup-delivery.js";
+export { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+export { executorSupportsCrossDeviceV2 } from "./workscene-runtime-projection.js";
+export {
+  createMeshExtensionManagement,
+  registerExtensionManagementMesh,
+} from "./extension-management-mesh.js";
+export { createExtensionContinuation } from "./extension-continuation.js";
 
 function assertAcceptedWorkSubset(
   current: readonly HostStopAcceptedWorkItem[],

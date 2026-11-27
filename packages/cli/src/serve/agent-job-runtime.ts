@@ -173,7 +173,15 @@ export function createAgentJobRuntimePort(
             .then(() =>
               runtime!.run({
                 modelInput: {
-                  messages: [userMessage(instruction.prompt)],
+                  messages: [
+                    {
+                      ...userMessage(instruction.prompt),
+                      inputIdentity: {
+                        id: options.runId ?? options.assignmentId ?? "scheduled-job",
+                        source: { kind: "system", subsystem: "scheduled-job" },
+                      },
+                    },
+                  ],
                 },
                 identity: { turnIndex: 0, source: "scheduler", runId: options.runId, assignmentId: options.assignmentId },
                 control: {

@@ -2745,8 +2745,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),",
-        "backupTargets: undefined,",
+        "const backupTargets = createBackupTargetConfigurationInfrastructure(zhixingHome);",
+        "const backupTargets = undefined as never;",
       ),
     )).join("\n"),
     /backup target configuration finite repository, physical factory or durability boundary drifted/,
@@ -6138,8 +6138,8 @@ test("AgentRuntime keeps one internal security chain behind finite public ports"
     inspectAgentRuntimeSecurityEncapsulation(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
       (text) => text.replace(
-        "    confirmationBroker,",
-        "    permissionStore: permissionStorage,\n    confirmationBroker,",
+        "\n    confirmationBroker,",
+        "\n    permissionStore: permissionStorage,\n    confirmationBroker,",
       ),
     )).join("\n"),
     /returns a security implementation/,
@@ -6148,8 +6148,8 @@ test("AgentRuntime keeps one internal security chain behind finite public ports"
     inspectAgentRuntimeSecurityEncapsulation(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
       (text) => text.replace(
-        "    confirmationBroker,",
-        "    securityImplementation() { return securityPipeline; },\n    confirmationBroker,",
+        "\n    confirmationBroker,",
+        "\n    securityImplementation() { return securityPipeline; },\n    confirmationBroker,",
       ),
     )).join("\n"),
     /returns a security implementation/,
@@ -6201,8 +6201,8 @@ test("AgentRuntime keeps workspace resolution internal while Anchor shares one h
     inspectAgentRuntimeWorkspaceEncapsulation(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
       (text) => text.replace(
-        "    confirmationBroker,",
-        "    workspaceMetadata: workspace,\n    confirmationBroker,",
+        "\n    confirmationBroker,",
+        "\n    workspaceMetadata: workspace,\n    confirmationBroker,",
       ),
     )).join("\n"),
     /returns workspace resolution/,
@@ -6847,7 +6847,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     ["packages/orchestrator/src/runtime/system-prompt.ts", (text) => `${text}\nfunction renamedPolicy(tools) { return tools.some(t => t.name === "workmode_enter") ? "scene policy" : null; }`],
     ["packages/orchestrator/src/profile/default-profiles.ts", (text) => `${text}\nconst renamedProfile = { instructions: "Call workmode_exit when done" };`],
     ["packages/orchestrator/src/profile/index.ts", (text) => `${text}\nexport { powerProfile as sceneProfile } from "./default-profiles.js";`],
-    ["packages/cli/src/serve/workmode-tools.ts", (text) => text.replace("systemPromptGuidance: WORKING_MODE_TEXT,", "")],
+    ["packages/cli/src/serve/workmode-tools.ts", (text) => text.replace("name: WORKSCENE_PRODUCT_TOOL_IDS.enter,", "name: WORKSCENE_PRODUCT_TOOL_IDS.enter,\n    systemPromptGuidance: WORKING_MODE_TEXT,")],
     ["packages/cli/src/serve/executor-role-runtime.ts", (text) => text.replace('import { powerProfile } from "./workscene-agent-guidance.js"', 'import { powerProfile } from "@zhixing-ai/orchestrator/profile"')],
   ]) {
     assert.match(inspectWorksceneRuntimeProjectionBoundary(mutate(relative, transform)).join("\n"), /guidance must be product-owned/u);
@@ -8499,6 +8499,10 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/skills/package-pagination.ts",
+    "packages/core/src/skills/catalog-save-service.ts",
+    "packages/core/src/skills/catalog-load-service.ts",
+    "packages/core/src/skills/catalog-admission-service.ts",
     "packages/core/src/skills/catalog-management-correctness.ts",
     "packages/core/src/workscene/application.ts",
     "packages/core/src/conversation/application.ts",
@@ -8597,6 +8601,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/protocol/execution-asset-snapshot.ts",
     "packages/cli/src/serve/execution-asset-cache.ts",
     "packages/tools-builtin/src/skill.ts",
+    "packages/tools-builtin/src/skill-v2.ts",
     "packages/tools-builtin/src/schedule.ts",
     "packages/tools-builtin/src/factories.ts",
     "packages/tools-builtin/src/index.ts",
@@ -9710,7 +9715,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/skills/catalog-application.ts",
-      (text) => text.replace(
+      (text) => text.replaceAll(
         "entry.mode === mode && !entry.disabled",
         "entry.mode === mode",
       ),
@@ -9767,7 +9772,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/runtime/skill-catalog-window-projection.ts",
-      (text) => text.replace('kind: "skill-catalog"', 'kind: "skill-get"'),
+      (text) => text.replaceAll('kind: "skill-catalog"', 'kind: "skill-get"'),
     )).join("\n"),
     /Product Skill window projection interprets catalog fields or omits the domain\/query boundary/,
   );
@@ -9831,8 +9836,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/src/skills/catalog-application.ts",
-      (text) => text.replace(
+      "packages/core/src/skills/catalog-load-service.ts",
+      (text) => text.replaceAll(
         "await this.correctness.stageUsage(`${request.operationId}:usage`,",
         "await this.correctness.stageUsage(request.operationId,",
       ),
@@ -10295,7 +10300,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/src/skills/catalog-application.ts",
+      "packages/core/src/skills/catalog-save-service.ts",
       (text) => text.replace(
         /await this\.correctness\.stage\(\s*stagedOperationId!,/u,
         "await bypassSkillSaveStage(",
@@ -10305,7 +10310,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/src/skills/catalog-application.ts",
+      "packages/core/src/skills/catalog-save-service.ts",
       (text) => text.replace(
         "record.recordSeq >= replayRecordSeq",
         "false",
@@ -10315,7 +10320,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/src/skills/catalog-application.ts",
+      "packages/core/src/skills/catalog-save-service.ts",
       (text) => text.replace(
         "sameSkillSaveDraft(replayMutation, candidate)",
         "false",
@@ -10335,7 +10340,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/src/skills/catalog-application.ts",
+      "packages/core/src/skills/catalog-admission-service.ts",
       (text) => text.replace(
         "candidate.digest !== pending.digest",
         "false",
@@ -10959,6 +10964,10 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/secrets/src/vault-secret-store.ts",
     "packages/cli/src/runtime/assignment-skill-adapter.ts",
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/skills/package-pagination.ts",
+    "packages/core/src/skills/catalog-save-service.ts",
+    "packages/core/src/skills/catalog-load-service.ts",
+    "packages/core/src/skills/catalog-admission-service.ts",
     "packages/core/src/advancement/application.ts",
     "packages/cli/src/serve/advancement-rubric-library.ts",
     "packages/cli/src/serve/advancement-controller.ts",

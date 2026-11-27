@@ -344,6 +344,9 @@ export function localConversationOwnerRuntime(
         ...(input.allowLegacyV1FollowRole !== undefined
           ? { allowLegacyV1FollowRole: input.allowLegacyV1FollowRole }
           : {}),
+        ...(input.requiresV2InputSources !== undefined
+          ? { requiresV2InputSources: input.requiresV2InputSources }
+          : {}),
       }),
     validateConversationRuntimeBinding: deps.validateConversationRuntimeBinding,
     preflightLocalConversationEnvironment:

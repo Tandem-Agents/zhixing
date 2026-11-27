@@ -692,8 +692,17 @@ export class LocalConversationRpcRouter
       caller,
     });
     this.#subscribe(conversationId, connection);
+    const turnOrigin = {
+      channel: "rpc",
+      triggeredBy: String(connection.id),
+      messageIdentity: {
+        id: turnId,
+        source: { kind: "user" as const },
+      },
+    } as const;
     const turn = this.input.owner.createAgentTurnExecution({
       input,
+      turnOrigin,
       notify: (method, payload) => this.#notify(conversationId, method, payload),
     });
     let admitted;
@@ -703,6 +712,7 @@ export class LocalConversationRpcRouter
         conversationId,
         input,
         turnIdentity,
+        turnOrigin,
         caller,
         execution: turn.execution,
       });

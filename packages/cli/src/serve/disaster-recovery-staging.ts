@@ -8,6 +8,7 @@ import type {
 import type {
   ArtifactReceiveProgress,
   ArtifactStore,
+  AuthorityCommitLog,
   IdentifiedPhysicalStepRunner,
   ProjectionReplayOptions,
   ProjectionReducer,
@@ -121,6 +122,12 @@ export interface DisasterRecoveryStagingArea {
   openTarget(input: Readonly<{
     sharedArtifacts: ArtifactStore;
   }>): DisasterRecoveryTargetStaging;
+  preserveLiveRestorePoint?(input: Readonly<{
+    transferId: string;
+    authorityLog: Pick<AuthorityCommitLog, "checkpoint" | "originCheckpoint" | "rebuildProjection">;
+    sharedArtifacts: ArtifactStore;
+    now?: () => number;
+  }>): Promise<void>;
   cleanupPostInstall(transferId: string): Promise<void>;
   cleanupCurrentDevice(signal?: AbortSignal): Promise<void>;
   close(): Promise<void>;

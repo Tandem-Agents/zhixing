@@ -1,4 +1,9 @@
-import { hasProtocolStateInMessages, normalizeUserTurnInput } from "@zhixing-ai/core";
+import {
+  hasProtocolStateInMessages,
+  isV2OnlyMessageInputSource,
+  normalizeUserTurnInput,
+  stripV2OnlyInputIdentitiesForLegacyFullWindow,
+} from "@zhixing-ai/core";
 import { isProgramOrigin, parseConversationId } from "@zhixing-ai/core/conversation";
 import {
   advancementExecutionContextBlock,
@@ -73,6 +78,7 @@ import type {
   FirstPartySurfaceSession,
   LosslessDataPlaneSession,
 } from "../lossless-data-plane-runtime.js";
+import { RemoteFirstPartyConfirmationBroker } from "../remote-first-party-confirmation-broker.js";
 import { shouldRetryRemoteObligation } from "../remote-obligation-failure.js";
 import type { AdmissionAndLifecycle } from "./admission-lifecycle.js";
 import type {
@@ -292,7 +298,11 @@ export class TurnExecution {
           } finally {
             this.#scope.clearRunClaimsInScope(capturedScope, runId, claimToken);
           }
-          return replayCommittedRun(committed.runRecord, committed.windowCompact);
+          return replayCommittedRun(
+            committed.runRecord,
+            committed.windowCompact,
+            committed.publishConflicts,
+          );
         }
         const replayedState = await journal.runState(runId);
         if (replayedState !== "queued") {
@@ -343,6 +353,7 @@ export class TurnExecution {
     let firstPartySurfaceSession: FirstPartySurfaceSession | undefined;
     let firstPartyFinalitySession: FirstPartyFinalitySession | undefined;
     let firstPartyStreamFinalSeq: number | undefined;
+    let releaseRemoteConfirmation: (() => void) | undefined;
     const drainFirstPartyProjection = (
       finalSeq: number,
       finalIdentity?: string,
@@ -422,26 +433,46 @@ export class TurnExecution {
             };
       const historyRequiresModelProtocolV2 =
         hasProtocolStateInMessages(executionMessages);
-      executorPlan = await this.#phase("executor-plan", () =>
-        this.#executorDispatch.plan({
-          conversationId: input.conversationId,
-          requirement: conversationExecutorRequirement(
-            input.invocation,
-            executionIngress,
-          ),
-          executionProfile,
-          permissionRules,
-          ...(recentExecutorId ? { recentExecutorId } : {}),
-          ...(appliedAdmission.environment
-            ? { environment: appliedAdmission.environment }
-            : {}),
-          modelSelection: manifestModelSelection,
-          ...(manifestModelSelection.mode === "follow-role" &&
-          !historyRequiresModelProtocolV2
-            ? { allowLegacyV1FollowRole: true }
-            : {}),
-        }),
+      const turnRequiresV2InputSources = Boolean(
+        executionIngress.turnOrigin?.messageIdentity &&
+        isV2OnlyMessageInputSource(executionIngress.turnOrigin.messageIdentity.source),
       );
+      try {
+        executorPlan = await this.#phase("executor-plan", () =>
+          this.#executorDispatch.plan({
+            conversationId: input.conversationId,
+            requirement: conversationExecutorRequirement(
+              input.invocation,
+              executionIngress,
+            ),
+            executionProfile,
+            permissionRules,
+            ...(recentExecutorId ? { recentExecutorId } : {}),
+            ...(appliedAdmission.environment
+              ? { environment: appliedAdmission.environment }
+              : {}),
+            modelSelection: manifestModelSelection,
+            ...(manifestModelSelection.mode === "follow-role" &&
+            !historyRequiresModelProtocolV2
+              ? { allowLegacyV1FollowRole: true }
+              : {}),
+            ...(turnRequiresV2InputSources
+              ? { requiresV2InputSources: true }
+              : {}),
+          }),
+        );
+      } catch (error) {
+        if (
+          !(error instanceof StorageMaintenanceCancelledError) &&
+          !(error instanceof ConversationAssignmentCancelledError) &&
+          (await journal.runState(runId)) === "queued"
+        ) {
+          await journal.closeQueuedRun(runId, "failed", executionFailureReason(error));
+          this.#scope.markRecoveryInScope(capturedScope, input.conversationId);
+          this.#settlement.kickDelivery(input.hooks?.onFinalPublishFailure);
+        }
+        throw error;
+      }
       const preparedAuthority = executorPlan.assignment;
       const targetExecutorId = preparedAuthority.executorId;
       if (targetExecutorId !== this.#authority.executorId) {
@@ -496,6 +527,15 @@ export class TurnExecution {
           origin,
           resourceContext,
         );
+      const isRemoteExecutor = targetExecutorId !== this.#authority.executorId;
+      const targetSupportsV2 =
+        !isRemoteExecutor || preparedAuthority.supportsCrossDeviceV2 === true;
+      if (!targetSupportsV2 && turnRequiresV2InputSources) {
+        throw new Error("Target remote executor does not support v2 message input sources");
+      }
+      const windowMessagesForExecutor = !targetSupportsV2
+        ? [...stripV2OnlyInputIdentitiesForLegacyFullWindow(executionMessages)]
+        : [...executionMessages];
       const issueEnvelope = (
         resourceLease: AssignmentResourceLease<"conversation">,
       ) =>
@@ -517,7 +557,7 @@ export class TurnExecution {
           windowInput: {
             t: "full",
             windowEpoch: authority.commitRevision + 1,
-            messages: [...executionMessages],
+            messages: windowMessagesForExecutor,
           },
           policy: preparedAuthority.policy,
           environment: preparedAuthority.environment,
@@ -670,6 +710,18 @@ export class TurnExecution {
           await firstPartyFinalitySession?.start();
         });
         const projectionFinality = firstPartyFinalitySession;
+        const remoteConfirmationBroker =
+          isRemoteExecutor && !isProgramOrigin(executionIngress)
+            ? new RemoteFirstPartyConfirmationBroker({
+                id: `remote-first-party:${assignmentId}`,
+                answer: async ({ requestId, decision }) => {
+                  if (!firstPartySurfaceSession?.answerInteraction) {
+                    throw new Error("Remote first-party confirmation relay is unavailable");
+                  }
+                  await firstPartySurfaceSession.answerInteraction({ requestId, decision });
+                },
+              })
+            : undefined;
         firstPartySurfaceSession = await this.#phase("first-party-surface", () =>
           retryControlAdmission(
             () =>
@@ -679,9 +731,33 @@ export class TurnExecution {
                 ref: streamRef,
                 ticket,
                 surfacePrincipal: executionIngress.surfacePrincipal,
-                adoptFrame: async (frame, _checkpoint, _signal, readDisplay) => {
+                adoptFrame: async (frame, _checkpoint, signal, readDisplay) => {
                   if (frame.payload.kind === "provisional-final") {
                     await projectionFinality?.acceptProvisionalFinal(frame);
+                  } else if (
+                    frame.payload.kind === "interaction" &&
+                    remoteConfirmationBroker
+                  ) {
+                    const interactionEvent = frame.payload.event;
+                    if (interactionEvent.t === "requested") {
+                      const display = interactionEvent.display;
+                      const rendered =
+                        "title" in display
+                          ? display
+                          : firstPartySurfaceSession?.materializeInteractionDisplay
+                            ? await firstPartySurfaceSession.materializeInteractionDisplay(
+                                display,
+                                signal,
+                              )
+                            : { title: interactionEvent.toolName, lines: [] };
+                      remoteConfirmationBroker.acceptRequested(
+                        interactionEvent,
+                        rendered,
+                        frame.meta.turnOrigin ?? executionIngress.turnOrigin,
+                      );
+                    } else {
+                      remoteConfirmationBroker.acceptFinished(interactionEvent);
+                    }
                   }
                   await this.#onFirstPartyFrame?.(frame, readDisplay);
                 },
@@ -690,6 +766,12 @@ export class TurnExecution {
             input.options?.abortSignal,
           ),
         );
+        if (remoteConfirmationBroker) {
+          releaseRemoteConfirmation = this.#requiredManager().bindExecutionConfirmation(
+            input.conversationId,
+            { confirmationBroker: remoteConfirmationBroker },
+          );
+        }
       }
       firstPartySurfaceSession?.start();
 
@@ -1095,6 +1177,7 @@ export class TurnExecution {
 
         if (terminal.kind === "cancelled") return cancelledRunResult(runResult);
         const { bundle, committed } = terminal;
+        let publishConflicts = 0;
         if (firstPartySurfaceSession && firstPartyFinalitySession) {
           const final = (await journal.pendingFinalFrames()).find(
             (candidate) =>
@@ -1107,6 +1190,7 @@ export class TurnExecution {
               "Committed first-party run has no durable final projection",
             );
           }
+          publishConflicts = final.publishConflicts ?? 0;
           const finalIdentity = canonicalize(final);
           capturedScope.pendingFirstPartyFinals.add(finalIdentity);
           try {
@@ -1118,20 +1202,30 @@ export class TurnExecution {
             input.hooks?.onFinalPublishFailure?.(error, runResult);
           }
           drainFirstPartyProjection(bundle.streamFinal.finalSeq, finalIdentity);
+        } else if ((bundle.body.mutationBatch?.globalCount ?? 0) > 0) {
+          publishConflicts = (await journal.publishResults(assignmentId)).filter(
+            (notice) => notice.decision.t === "conflicted",
+          ).length;
         }
         this.#scope.markRecoveryInScope(capturedScope, input.conversationId);
         this.#settlement.kickDelivery(
           input.hooks?.onFinalPublishFailure,
           runResult,
         );
-        return runResult;
+        return publishConflicts > 0
+          ? { ...runResult, publishConflicts }
+          : runResult;
       }).bind(this);
 
       return yield* executorPlan.run({
         execute: executeLocal,
         foreground: attemptForeground,
         onCommitted: (committed) =>
-          replayCommittedRun(committed.runRecord, committed.windowCompact),
+          replayCommittedRun(
+            committed.runRecord,
+            committed.windowCompact,
+            committed.publishConflicts,
+          ),
         onRemoteSettled: () => {
           this.#scope.markRecoveryInScope(capturedScope, input.conversationId);
           this.#settlement.kickDelivery();
@@ -1188,19 +1282,23 @@ export class TurnExecution {
       this.#scope.markRecoveryInScope(capturedScope, input.conversationId);
       throw error;
     } finally {
-      await this.#settlement.cleanupRunAttempt({
-        attempt: attemptHandle,
-        assignmentId,
-        getChannelSession: () => channelSession,
-        getFirstPartyStreamFinalSeq: () => firstPartyStreamFinalSeq,
-        drainFirstPartyProjection,
-        getFirstPartyFinalitySession: () => firstPartyFinalitySession,
-        getFirstPartySurfaceSession: () => firstPartySurfaceSession,
-        getExecutorPlan: () => executorPlan,
-        getExecutionScope: () => executionScope,
-        runFailed,
-        runError,
-      });
+      try {
+        releaseRemoteConfirmation?.();
+      } finally {
+        await this.#settlement.cleanupRunAttempt({
+          attempt: attemptHandle,
+          assignmentId,
+          getChannelSession: () => channelSession,
+          getFirstPartyStreamFinalSeq: () => firstPartyStreamFinalSeq,
+          drainFirstPartyProjection,
+          getFirstPartyFinalitySession: () => firstPartyFinalitySession,
+          getFirstPartySurfaceSession: () => firstPartySurfaceSession,
+          getExecutorPlan: () => executorPlan,
+          getExecutionScope: () => executionScope,
+          runFailed,
+          runError,
+        });
+      }
     }
   }
 

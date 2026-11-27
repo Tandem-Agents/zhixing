@@ -991,6 +991,10 @@ export function createLocalOwnedProgramConversationHandler(options: {
     const turnOrigin = {
       channel: PROGRAM_TURN_CHANNEL,
       triggeredBy: requestId,
+      messageIdentity: {
+        id: physicalTurnId,
+        source: { kind: "program" as const },
+      },
     } as const;
     let localEarlyRejection: ProgramConversationSendResult | undefined;
     try {
@@ -3659,6 +3663,10 @@ export function createHostProgramConversationApplication(
     const turnOrigin = {
       channel: PROGRAM_TURN_CHANNEL,
       triggeredBy: requestId,
+      messageIdentity: {
+        id: physicalTurnId,
+        source: { kind: "program" as const },
+      },
     } as const;
 
     if (target.kind === "local") {

@@ -667,6 +667,17 @@
     },
     {
       "emptyRequest": {},
+      "method": "mcp.statusV2",
+      "outcome": {
+        "kind": "result",
+        "shape": {
+          "servers": []
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "schedule.abortRun",
       "outcome": {
         "code": -32602,
@@ -1292,7 +1303,33 @@
     },
     {
       "emptyRequest": {},
+      "method": "skill.listV2",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "skill.setState",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "skill.setVisibility",
       "outcome": {
         "code": -32602,
         "kind": "error",

@@ -1,4 +1,5 @@
 import type { AgentYield, RunResult } from "@zhixing-ai/core/loop";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
 import type {
   ConversationPerspectivesCorrectnessPort,
   ConversationPerspectivesDurableExecutionInput,
@@ -8,7 +9,10 @@ import type {
   ConversationManager,
   ManagedSession,
 } from "@zhixing-ai/owner-kernel/conversation-manager";
-import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import type {
+  SessionRuntime,
+  SessionRuntimeOrchestrationV1Params,
+} from "@zhixing-ai/owner-kernel/types";
 
 export function createConversationPerspectivesCorrectnessPort(input: Readonly<{
   manager: ConversationManager;
@@ -40,8 +44,30 @@ export function projectConversationPerspectivesRuntime(
   managed: ManagedSession,
   runtime: SessionRuntime = managed.runtime,
   identity: Parameters<NonNullable<SessionRuntime["withRunObservation"]>>[0] = { conversationId: managed.conversationId },
+  runContext?: SessionRuntimeOrchestrationV1Params["runContext"],
 ): ConversationPerspectivesRuntimePort {
   const observe = <T>(work: () => Promise<T>): Promise<T> => runtime.withRunObservation ? runtime.withRunObservation(identity, work) : work();
+  const buildOrchestrationRunContext = (): SessionRuntimeOrchestrationV1Params["runContext"] => {
+    const scope = parseConversationId(managed.conversationId).scope;
+    const defaultRole: "main" | "power" = scope.kind === "workscene" ? "power" : "main";
+    const profile = runtime.executionProfile?.();
+    const security = runtime.securitySnapshot?.();
+    const mountedMcpServers = profile
+      ? [...new Set(profile.tools
+          .map((name) => /^mcp__([^_]+)__/.exec(name)?.[1])
+          .filter((id): id is string => Boolean(id)))].sort()
+      : undefined;
+    return {
+      conversationId: managed.conversationId,
+      runtimeKind: "conversation",
+      lineageRole: defaultRole,
+      effectivePrimaryRole: defaultRole,
+      hasAuthorizedWorkspace: security ? security.workspacePath !== null : false,
+      ...(profile ? { toolNames: profile.tools } : {}),
+      ...(mountedMcpServers ? { mountedMcpServers } : {}),
+      ...runContext,
+    };
+  };
   const projection: ConversationPerspectivesRuntimePort = {
     conversationId: managed.conversationId,
     windowMessages: () => managed.window.getMessages(),
@@ -65,6 +91,7 @@ export function projectConversationPerspectivesRuntime(
       if (!runtime.runOrchestrationV1) {
         throw new Error("session runtime does not support orchestration execution.");
       }
+      const orchestrationRunContext = buildOrchestrationRunContext();
       return observe(() => runtime.runOrchestrationV1!({
         executable: request.executable,
         runInput: request.runInput,
@@ -72,6 +99,7 @@ export function projectConversationPerspectivesRuntime(
         ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
         eventBus: request.eventBus,
         parentLineage: "perspectives",
+        runContext: orchestrationRunContext,
         ...(request.authorizeToolExecution
           ? { authorizeToolExecution: request.authorizeToolExecution }
           : {}),
@@ -108,6 +136,10 @@ async function runDurablePerspective(
         projectConversationPerspectivesRuntime(managed, baseRuntime, {
           conversationId: input.conversationId,
           refs: [...(options?.runId ? [{ kind: "run", id: options.runId }] : []), ...(options?.assignmentId ? [{ kind: "assignment", id: options.assignmentId }] : []), ...(options?.turnContext?.turnId ? [{ kind: "turn", id: options.turnContext.turnId }] : [])],
+        }, {
+          conversationId: input.conversationId,
+          runtimeKind: "conversation",
+          ...(options?.turnContext?.turnOrigin ? { turnOrigin: options.turnContext.turnOrigin } : {}),
         }),
         {
           ...(options?.authorizeToolExecution

@@ -518,18 +518,36 @@ export function ingressForTurn(
   const origin = input.options?.turnContext?.turnOrigin;
   const ingressId = input.options?.turnContext?.turnId ?? `ingress:${randomUUID()}`;
   if (origin?.target && origin.channel !== "rpc") {
-    const responder = {
-      channelId: origin.channel,
-      platformSubject: origin.triggeredBy ?? "unknown",
+    const sanitizedTarget = {
+      channelId: origin.target.channelId,
+      to: origin.target.to,
+      ...(origin.target.threadId !== undefined ? { threadId: origin.target.threadId } : {}),
     };
+    const sanitizedOrigin = {
+      ...origin,
+      target: sanitizedTarget,
+    };
+    const responder = {
+      channelId: sanitizedOrigin.channel,
+      platformSubject: sanitizedOrigin.triggeredBy ?? "unknown",
+    };
+    const channelOrigin = sanitizedOrigin.messageIdentity
+      ? sanitizedOrigin
+      : {
+          ...sanitizedOrigin,
+          messageIdentity: {
+            id: ingressId,
+            source: { kind: "channel" as const, channelId: sanitizedOrigin.channel },
+          },
+        };
     return {
       kind: "channel",
       surfacePrincipal: surfacePrincipalForTurn(input),
       responder,
-      replyTarget: origin.target,
+      replyTarget: sanitizedTarget,
       deviceId,
       ingressId,
-      turnOrigin: origin,
+      turnOrigin: channelOrigin,
       receivedAt,
     };
   }
@@ -773,6 +791,7 @@ export function cancelledRunResult(result: RunResult): RunResult {
 export function replayCommittedRun(
   runRecord: TranscriptRunRecord,
   windowCompact: RunResult["windowCompact"],
+  publishConflicts?: number,
 ): RunResult {
   const message = [...runRecord.messages]
     .reverse()
@@ -794,6 +813,9 @@ export function replayCommittedRun(
     },
     ...(runRecord.postTurnControl ? { pendingPostTurnControl: runRecord.postTurnControl } : {}),
     ...(windowCompact ? { windowCompact } : {}),
+    ...(publishConflicts !== undefined && publishConflicts > 0
+      ? { publishConflicts }
+      : {}),
     newMessages: runRecord.messages.slice(1),
     durationMs: 0,
   };

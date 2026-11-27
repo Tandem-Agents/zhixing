@@ -156,6 +156,31 @@ export class ConversationTransferMeshClient {
     return result;
   }
 
+  async supportsV2InputSources(signal?: AbortSignal): Promise<boolean> {
+    try {
+      const raw = decode(
+        await this.client.request(
+          CONVERSATION_TRANSFER_MESH_SERVICE,
+          encode({ v: 2, op: "capabilities" }),
+          signal,
+        ),
+      );
+      return (
+        typeof raw === "object" &&
+        raw !== null &&
+        !Array.isArray(raw) &&
+        (raw as { v?: unknown }).v === 2 &&
+        (raw as { status?: unknown }).status === "ok" &&
+        (raw as { supportsV2InputSources?: unknown }).supportsV2InputSources === true
+      );
+    } catch (error) {
+      if (isLegacyV1TransferCapabilitiesRejection(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   async #request(
     command: Parameters<typeof createSignedConversationTransferCommand>[0],
   ): Promise<ConversationTransferResult> {
@@ -192,8 +217,19 @@ export function registerConversationTransferMeshService(
     availability: "negotiated-version",
     authorize: (connection) => options.authorizePeer(connection.peer.deviceId),
     handler: async (payload, connection) => {
+      const raw = decode(payload);
+      if (
+        typeof raw === "object" &&
+        raw !== null &&
+        !Array.isArray(raw) &&
+        (raw as { v?: unknown }).v === 2 &&
+        (raw as { op?: unknown }).op === "capabilities" &&
+        Object.keys(raw).sort().join(",") === "op,v"
+      ) {
+        return encode({ v: 2, status: "ok", supportsV2InputSources: true });
+      }
       const command = validateConversationTransferCommand(
-        decode(payload),
+        raw,
         options.verifier,
       );
       try {
@@ -428,4 +464,29 @@ function decode(bytes: Uint8Array): unknown {
   const value = JSON.parse(text) as unknown;
   if (canonicalize(value) !== text) throw new TypeError("Conversation transfer payload is not canonical");
   return value;
+}
+
+function isLegacyV1TransferCapabilitiesRejection(error: unknown): boolean {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { readonly code?: unknown }).code
+      : undefined;
+  if (
+    code === "connection-closed" ||
+    code === "request-timeout" ||
+    code === "request-aborted" ||
+    code === "unauthorized-peer" ||
+    code === "service-unavailable" ||
+    code === "resource-exhausted"
+  ) {
+    return false;
+  }
+  if (code === "service-failed") {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/(?:abort|timeout|timed out|disconnect|closed|econn|enotfound|unavailable|transport|socket|reset)/iu.test(message)) {
+    return false;
+  }
+  return /Conversation transfer|command|version|must be 1|invalid|unsupported/iu.test(message);
 }

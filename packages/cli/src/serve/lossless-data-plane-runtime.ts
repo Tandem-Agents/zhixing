@@ -3,9 +3,12 @@ import type {
   ConversationChannelChallengeToken,
   DataPlaneTicket,
   ExecutionRef,
+  InteractionDisplay,
 } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
+  type FirstPartyInteractionDecision,
+  type InlineInteractionDisplay,
   type ProtocolSignatureVerifier,
   type StreamVerifierCheckpoint,
 } from "@zhixing-ai/core/protocol";
@@ -62,6 +65,14 @@ export interface FirstPartySurfaceSession extends LosslessDataPlaneSession {
   restoreDirect(): Promise<void>;
   checkpoint(): StreamVerifierCheckpoint;
   waitForSeq(seq: number, signal?: AbortSignal): Promise<void>;
+  materializeInteractionDisplay?(
+    display: InteractionDisplay,
+    signal?: AbortSignal,
+  ): Promise<InlineInteractionDisplay>;
+  answerInteraction?(input: {
+    readonly requestId: string;
+    readonly decision: FirstPartyInteractionDecision;
+  }): Promise<void>;
 }
 
 export interface FirstPartySurfaceSessionInput {
@@ -357,6 +368,14 @@ export class LosslessDataPlaneRuntime {
     }).manager;
     const session = new ManagedFirstPartySurfaceSession({
       manager,
+      answerInteraction: (answer) =>
+        endpoint.answerChannel({
+          assignmentId: input.assignmentId,
+          requestId: answer.requestId,
+          ticketId: input.ticket.ticketId,
+          surfacePrincipal: input.surfacePrincipal,
+          decision: answer.decision,
+        }),
       onClosed: () => this.#sessions.delete(session),
       onError: this.#onError,
     });
@@ -640,6 +659,10 @@ class AuthenticatedFirstPartySurfaceAdapter {
 
 class ManagedFirstPartySurfaceSession implements FirstPartySurfaceSession {
   readonly #manager: AssignmentStreamPathManager;
+  readonly #answerInteraction: (input: {
+    readonly requestId: string;
+    readonly decision: FirstPartyInteractionDecision;
+  }) => Promise<void>;
   readonly #onClosed: () => void;
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #controller = new AbortController();
@@ -655,10 +678,15 @@ class ManagedFirstPartySurfaceSession implements FirstPartySurfaceSession {
 
   constructor(options: {
     readonly manager: AssignmentStreamPathManager;
+    readonly answerInteraction: (input: {
+      readonly requestId: string;
+      readonly decision: FirstPartyInteractionDecision;
+    }) => Promise<void>;
     readonly onClosed: () => void;
     readonly onError?: (error: Error) => void;
   }) {
     this.#manager = options.manager;
+    this.#answerInteraction = options.answerInteraction;
     this.#onClosed = options.onClosed;
     this.#onError = options.onError;
     this.#acknowledgedSeq = options.manager.checkpoint().lastSeq;
@@ -666,6 +694,20 @@ class ManagedFirstPartySurfaceSession implements FirstPartySurfaceSession {
 
   get path(): AssignmentStreamPath | undefined {
     return this.#manager.path;
+  }
+
+  materializeInteractionDisplay(
+    display: InteractionDisplay,
+    signal?: AbortSignal,
+  ): Promise<InlineInteractionDisplay> {
+    return this.#manager.materializeInteractionDisplay(display, signal);
+  }
+
+  answerInteraction(input: {
+    readonly requestId: string;
+    readonly decision: FirstPartyInteractionDecision;
+  }): Promise<void> {
+    return this.#answerInteraction(input);
   }
 
   start(): void {

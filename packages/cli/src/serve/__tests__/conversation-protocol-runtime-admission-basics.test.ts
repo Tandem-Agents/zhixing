@@ -1065,4 +1065,185 @@ describe("ConversationProtocolRuntime", () => {
       expect(phases).toEqual(["preparing", "blocked"]);
     } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
   }, 45000);
+
+  it("surfaces publishConflicts on RunResult and session.complete for a local channel turn when a staged skill save conflicts at commit", async () => {
+    const home = await createTempDir("host-channel-skill-conflict");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    await authority.installPermissionSnapshot(
+      createSignedTrustRuleSnapshot(
+        { snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() },
+        authority.signer,
+      ),
+    );
+    const context = () => ({
+      principal: { kind: "host" as const, component: "test" },
+      requestId: crypto.randomUUID(),
+      authority: { domain: "global" as const, anchorEpoch: authority.anchorEpoch },
+      deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+    const content = await authority.artifacts.put(
+      Buffer.from("---\nname: channel-skill\ndescription: original desc\n---\n# Original\n"),
+    );
+    await authority.globalState!.mutate(
+      {
+        kind: "skill-create-v2",
+        mode: "main",
+        record: {
+          name: "channel-skill",
+          description: "original desc",
+          content,
+          visibility: { modelAutoIndex: true, userSlashCommand: true },
+        },
+      },
+      context(),
+    );
+    const coordinator = new GlobalMutationCommitCoordinator({
+      log: authority.authorityLog,
+      artifacts: authority.artifacts,
+      participants: authority.globalMutationParticipants,
+      refreshSchedule: async () => {},
+      scheduleDefinitionFor: () => undefined,
+    });
+    const publisher = new SchedulerConversationMutationPublisher({
+      anchorEpoch: authority.anchorEpoch,
+      coordinator,
+      sourceForAssignment: () => ({}),
+    });
+    const skills = createAssignmentSkillPorts(authority.artifacts, {
+      admissionLlm: async () => {
+        throw new Error("not needed");
+      },
+    });
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "channel-conflict",
+      async *run(messages, options) {
+        await runContextStorage.run(
+          {
+            bus: createEventBus(),
+            lineage: "main",
+            assignmentMutations: options?.assignmentMutations,
+            globalQuery: options?.globalQuery,
+            assignmentIssuedAt: options?.assignmentIssuedAt,
+          },
+          async () => {
+            const readRes = await skills.loadApplication.readPackage!({
+              id: `user:${skillNameToId("channel-skill")}`,
+              operationId: "channel-read",
+            });
+            if ("error" in readRes || !readRes.writeTemplate) {
+              throw new Error("expected writeTemplate");
+            }
+            await skills.saveApplication.save(
+              {
+                name: "channel-skill",
+                description: "conflicted channel draft",
+                body: "# Conflicted Draft\n",
+                mode: "main",
+                expectedRevision: readRes.writeTemplate.expectedRevision,
+                expectedVersion: readRes.writeTemplate.expectedVersion,
+              },
+              "channel-save",
+            );
+          },
+        );
+        // Concurrent anchor edit after staging but before the local channel turn seals & commits
+        await authority.globalState!.mutate(
+          {
+            kind: "skill-set-visibility",
+            skillId: skillNameToId("channel-skill"),
+            expectedRevision: 1,
+            visibility: { modelAutoIndex: true, userSlashCommand: false },
+          },
+          context(),
+        );
+        const assistant: Message = {
+          role: "assistant",
+          content: [{ type: "text", text: "staged update" }],
+        };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return {
+          agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: {
+            timestamp: new Date().toISOString(),
+            messages: [messages.at(-1)!, assistant],
+            usage,
+          },
+          newMessages: [assistant],
+          durationMs: 1,
+        };
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    const unbind = protocol.bindMutationPublisher(publisher);
+    manager = new ConversationManager(
+      { create: async () => runtime },
+      undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
+    );
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    try {
+      const managed = await getOrCreateActiveConversation(
+        authority,
+        manager,
+        "channel-conflict",
+      );
+      const projected = await projectSessionTurn({
+        manager,
+        managed,
+        text: "update channel skill",
+        turnId: "channel-conflict-turn",
+        notify: (method, params) => notifications.push({ method, params }),
+        runOptions: {
+          source: "channel",
+          turnContext: {
+            turnId: "channel-conflict-turn",
+            turnOrigin: {
+              channel: "feishu",
+              triggeredBy: "owner",
+              target: { channelId: "feishu", to: "owner" },
+            },
+          },
+        },
+      });
+      expectSettled(projected);
+      expect(projected.runResult.publishConflicts).toBe(1);
+      const completeNotice = notifications.find(
+        (item) => item.method === "session.complete",
+      );
+      expect(completeNotice?.params).toMatchObject({
+        conversationId: "channel-conflict",
+        turnId: "channel-conflict-turn",
+        publishConflicts: 1,
+        result: { reason: "completed" },
+      });
+      const after = await authority.globalState!.read(
+        { kind: "skill-get-v2", skillId: skillNameToId("channel-skill") },
+        context(),
+      );
+      expect(after).toMatchObject({
+        kind: "skill-get-v2",
+        entry: {
+          revision: 2,
+          description: "original desc",
+          visibility: { modelAutoIndex: true, userSlashCommand: false },
+          usage: { hitCount: 1 },
+        },
+      });
+    } finally {
+      unbind();
+      await protocol.stopRecoveryLoop();
+      await manager.disposeAll();
+    }
+  }, 30000);
 });

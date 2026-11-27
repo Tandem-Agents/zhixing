@@ -3,13 +3,18 @@ import { isProgramOrigin } from "@zhixing-ai/core/conversation";
 import { executionTurnContext } from "./execution-turn-context.js";
 import { type ArtifactStore } from "@zhixing-ai/core/authority";
 import { type Message } from "@zhixing-ai/core";
-import { type RunResult } from "@zhixing-ai/core/loop";
+import {
+  isV2OnlyMessageInputSource,
+  stripV2OnlyInputIdentitiesForLegacyFullWindow,
+  type RunResult,
+} from "@zhixing-ai/core/loop";
 import {
   createLeaseBudgetTracker,
   type AuthorityCallContext,
   type DispatchEnvelope,
   type ExecutionAbortRequest,
   type ExecutionRef,
+  type IngressContext,
   type ResourceReservationPort,
   type RunSubmissionPort,
   type SealedBundle,
@@ -48,6 +53,15 @@ import {
 } from "./assignment-global-state-ports.js";
 
 const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
+
+const V2_CAPABILITY_TOOLS = new Set([
+  "skill_read",
+  "skill_save",
+  "skill_admit",
+  "skill_materialize",
+  "runtime_inspect",
+  "extension_validate",
+]);
 
 export interface ConversationAssignmentWorkerOptions {
   readonly inputFor?: (envelope: Extract<DispatchEnvelope, { execution: "conversation" }>) => Promise<import("@zhixing-ai/core/loop").RunInputPort>;
@@ -281,9 +295,17 @@ export class ConversationAssignmentWorker {
       runId: envelope.work.runId,
       ownerEpoch: envelope.work.ownerEpoch,
     };
-    const streamMeta = envelope.work.ingress.turnOrigin
-      ? { turnOrigin: envelope.work.ingress.turnOrigin }
-      : {};
+    const envelopeSupportsV2 =
+      Boolean(
+        envelope.work.ingress.turnOrigin?.messageIdentity &&
+          isV2OnlyMessageInputSource(envelope.work.ingress.turnOrigin.messageIdentity.source),
+      ) ||
+      (envelope.manifest?.tools?.some((toolName) => V2_CAPABILITY_TOOLS.has(toolName)) ?? false);
+    let wireStreamMeta = projectStreamMetaForAnchor(
+      envelope.work.ingress.turnOrigin,
+      envelopeSupportsV2,
+    );
+    let supportsV2 = envelopeSupportsV2;
     let toolCalls = 0;
     let result: RunResult | undefined;
     let runtime: Awaited<ReturnType<RuntimeFactory["create"]>> | undefined;
@@ -308,7 +330,7 @@ export class ConversationAssignmentWorker {
         context,
         surfacePrincipal: envelope.work.ingress.surfacePrincipal,
         stream: activeStream,
-        streamMeta,
+        streamMeta: wireStreamMeta,
         signal: this.#abort.signal,
         broker: undefined,
         ...(isProgramOrigin(envelope.work.ingress)
@@ -353,7 +375,42 @@ export class ConversationAssignmentWorker {
         );
       }
       activeInteractionBinding.broker = runtime.confirmationBroker;
-      const messages = await loadWindowMessages(envelope, this.options.artifacts);
+      const rawMessages = await loadWindowMessages(envelope, this.options.artifacts);
+      supportsV2 =
+        envelopeSupportsV2 ||
+        rawMessages.some(
+          (m) => m.inputIdentity !== undefined && isV2OnlyMessageInputSource(m.inputIdentity.source),
+        );
+      wireStreamMeta = projectStreamMetaForAnchor(
+        envelope.work.ingress.turnOrigin,
+        supportsV2,
+      );
+      const fallbackIdentity =
+        envelope.work.ingress.turnOrigin?.messageIdentity ??
+        (envelope.work.ingress.kind === "channel"
+          ? (() => {
+              const channelId =
+                envelope.work.ingress.responder?.channelId ??
+                envelope.work.ingress.replyTarget?.channelId;
+              return channelId
+                ? {
+                    id: envelope.work.ingress.ingressId,
+                    source: {
+                      kind: "channel" as const,
+                      channelId,
+                    },
+                  }
+                : undefined;
+            })()
+          : undefined);
+      const messages = rawMessages.map((message, index) =>
+        index === rawMessages.length - 1 &&
+        message.role === "user" &&
+        !message.inputIdentity &&
+        fallbackIdentity
+          ? { ...message, inputIdentity: structuredClone(fallbackIdentity) }
+          : message,
+      );
       inputPort = await this.options.inputFor?.(envelope);
       const kernel = new ConversationKernelExecution(runtime);
       this.#kernels.set(assignmentId, kernel);
@@ -369,9 +426,9 @@ export class ConversationAssignmentWorker {
         onProtocolEvent: async (event, meta) => {
           protocolEventOrdinal += 1;
           await activeStream.append(
-            { kind: "agent-event", event },
+            { kind: "agent-event", event: projectProtocolEventForAnchor(event, supportsV2) },
             {
-              ...streamMeta,
+              ...wireStreamMeta,
               ...(meta.lineage ? { lineage: meta.lineage } : {}),
             },
             abortSignal,
@@ -458,7 +515,7 @@ export class ConversationAssignmentWorker {
           yieldOrdinal += 1;
           await activeStream.append(
             { kind: "agent-yield", yield: item.value },
-            streamMeta,
+            wireStreamMeta,
             abortSignal,
             `yield:${yieldOrdinal}`,
           );
@@ -492,7 +549,7 @@ export class ConversationAssignmentWorker {
           context,
           interactionBinding,
         );
-        await stream?.final(streamMeta);
+        await stream?.final(wireStreamMeta);
       } catch (error) {
         executionError = asError(error);
       }
@@ -516,7 +573,7 @@ export class ConversationAssignmentWorker {
         context,
         interactionBinding,
       );
-      await stream?.final(streamMeta);
+      await stream?.final(wireStreamMeta);
       await this.options.ledger.failExecution(assignmentId, {
         reason: error.message,
         usageFinal,
@@ -547,7 +604,7 @@ export class ConversationAssignmentWorker {
         });
         throw failure;
       }
-      await stream.final(streamMeta);
+      await stream.final(wireStreamMeta);
       await this.options.ledger.failExecution(assignmentId, {
         reason: runFailureReason(result),
         usageFinal,
@@ -562,6 +619,13 @@ export class ConversationAssignmentWorker {
       type: "run",
       runId: envelope.work.runId,
       runIndex: envelope.work.baseRevision,
+      ...(result.runRecord.messages
+        ? {
+            messages: supportsV2
+              ? result.runRecord.messages
+              : stripV2OnlyInputIdentitiesForLegacyFullWindow(result.runRecord.messages),
+          }
+        : {}),
       ...(source ? { source } : {}),
       ...(advancement ? { advancement } : {}),
     };
@@ -576,7 +640,7 @@ export class ConversationAssignmentWorker {
         context,
         interactionBinding,
       );
-      const streamFinal = await stream.final(streamMeta, abortSignal);
+      const streamFinal = await stream.final(wireStreamMeta, abortSignal);
       bundle = await this.options.ledger.sealConversationBundle(assignmentId, {
         runRecord,
         ...(result.windowCompact ? { windowCompact: result.windowCompact } : {}),
@@ -747,9 +811,19 @@ function assignmentResourceContext(
   usageId: string,
 ): AuthorityCallContext {
   const context = assignmentContext(envelope);
+  const leaseExpiry = envelope.resourceLease?.expiry;
+  const leaseMs = typeof leaseExpiry === "string" ? Date.parse(leaseExpiry) : Number.NaN;
+  const contextMs = Date.parse(context.deadlineAt);
+  const deadlineAt =
+    typeof leaseExpiry === "string" &&
+    Number.isFinite(leaseMs) &&
+    (!Number.isFinite(contextMs) || leaseMs < contextMs)
+      ? leaseExpiry
+      : context.deadlineAt;
   return {
     ...context,
     requestId: `resource:${envelope.assignmentId}:${usageId}`,
+    deadlineAt,
   };
 }
 
@@ -758,6 +832,44 @@ function runFailureReason(result: RunResult): string {
   if (result.agentResult.reason === "max_turns") return "达到最大轮次限制";
   if (result.agentResult.reason === "aborted") return "运行已中止";
   return "运行未完成";
+}
+
+function projectStreamMetaForAnchor(
+  turnOrigin: IngressContext["turnOrigin"],
+  supportsV2: boolean,
+): { readonly turnOrigin?: NonNullable<IngressContext["turnOrigin"]> } {
+  if (!turnOrigin) return {};
+  if (
+    !supportsV2 &&
+    turnOrigin.messageIdentity &&
+    isV2OnlyMessageInputSource(turnOrigin.messageIdentity.source)
+  ) {
+    const { messageIdentity: _omitted, ...legacyOrigin } = turnOrigin;
+    return { turnOrigin: legacyOrigin };
+  }
+  return { turnOrigin };
+}
+
+function projectProtocolEventForAnchor<
+  E extends { readonly event: string; readonly payload: unknown },
+>(event: E, supportsV2: boolean): E {
+  if (supportsV2 || event.event !== "agent:input_received") return event;
+  const payload = event.payload as {
+    readonly inputs?: readonly {
+      readonly text: string;
+      readonly identity?: Message["inputIdentity"];
+    }[];
+  };
+  if (!Array.isArray(payload?.inputs)) return event;
+  let changed = false;
+  const nextInputs = payload.inputs.map((item) => {
+    if (item.identity && isV2OnlyMessageInputSource(item.identity.source)) {
+      changed = true;
+      return { text: item.text };
+    }
+    return item;
+  });
+  return changed ? { ...event, payload: { ...payload, inputs: nextInputs } } : event;
 }
 
 class IncompleteCancellationProofError extends TypeError {

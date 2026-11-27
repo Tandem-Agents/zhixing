@@ -20,7 +20,6 @@ import { createAdvancementProposalTool } from "./advancement-proposal-tool.js";
 import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing-ai/core/advancement/proposal-identity";
 import { powerProfile } from "./workscene-agent-guidance.js";
 import {
-  createKernelWindowPromptProjection,
   type AgentRuntimeLifecycle,
   type AgentRuntime,
 } from "@zhixing-ai/orchestrator/runtime";
@@ -46,6 +45,7 @@ import {
   WORKSCENE_PRODUCT_TOOL_IDS,
   type WorksceneToolDirectory,
 } from "./workmode-tools.js";
+import { LEGACY_COMPAT_BUILTIN_TOOLS } from "@zhixing-ai/tools-builtin";
 import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
@@ -56,6 +56,33 @@ import type {
 } from "./permission-storage-infrastructure.js";
 import type { RuntimeExecutionProfile } from "@zhixing-ai/core/types";
 
+const JOB_EXCLUDED_SKILL_TOOLS = new Set([
+  "skill_save",
+  "skill_admit",
+  "save_skill",
+  "admit_skill",
+]);
+
+const V2_ONLY_CROSS_DEVICE_STRIPPED_TOOLS = new Set([
+  "skill_save",
+  "skill_admit",
+  "skill_materialize",
+  "extension_validate",
+  "runtime_inspect",
+  "save_skill",
+  "admit_skill",
+]);
+
+/** 判断远端执行器是否已具备跨机 v2 能力（公告新代 skill_read 与 runtime_inspect）。 */
+export function executorSupportsCrossDeviceV2(
+  descriptor: Pick<import("@zhixing-ai/core/contracts").CapabilityDescriptor, "tools">,
+): boolean {
+  return (
+    descriptor.tools.includes("skill_read") &&
+    descriptor.tools.includes("runtime_inspect")
+  );
+}
+
 /** Conversation inventories are device-local, not a task's declared tool requirements.
  * Keep portable tools mandatory; MCP and owner-only management are projected by location.
  * Job manifests retain their separate, explicit capability requirements. */
@@ -63,6 +90,7 @@ export function projectConversationCapabilitiesForDevice(input: {
   readonly profile: RuntimeExecutionProfile;
   readonly ownerDeviceId: string;
   readonly executorDeviceId: string;
+  readonly supportsCrossDeviceV2?: boolean;
   readonly capabilities: {
     readonly tools: readonly string[];
     readonly mcpServers: readonly string[];
@@ -74,15 +102,20 @@ export function projectConversationCapabilitiesForDevice(input: {
     "mcp_connect", "schedule", "task_list", "workscene_change_approve",
     "workscene_rename_current", "workscene_set_workdir_current", "workscene_clear_workdir_current",
   ]);
+  const legacyRemoteV1 = input.supportsCrossDeviceV2 !== true;
   const projectedProviderIds = input.capabilities.modelConnections !== undefined
     ? input.capabilities.modelConnections
         .filter((entry) => entry.ready)
         .map((entry) => entry.connectionId)
         .sort()
     : [...input.profile.providerIds];
+  const portableTools = input.profile.tools
+    .filter((name) => !ownerTools.has(name) && !name.startsWith("mcp__"))
+    .filter((name) => !legacyRemoteV1 || !V2_ONLY_CROSS_DEVICE_STRIPPED_TOOLS.has(name))
+    .map((name) => (legacyRemoteV1 && name === "skill_read" ? "load_skill" : name));
   return {
     tools: [...new Set([
-      ...input.profile.tools.filter(name => !ownerTools.has(name) && !name.startsWith("mcp__")),
+      ...portableTools,
       ...input.capabilities.tools.filter(name => name.startsWith("mcp__")),
       ...(input.profile.tools.includes("mcp_connect") && input.capabilities.tools.includes("mcp_delegate") ? ["mcp_delegate"] : []),
     ])].sort(),
@@ -110,6 +143,7 @@ export interface AnchorRuntimeProjectionAssembly {
   scene(input: {
     readonly scene: WorksceneRuntimeSceneIdentity;
     readonly absolutePath: string | null;
+    readonly hasWorkspace?: boolean;
   }): ConversationRuntimeProjection;
   ephemeral(): RuntimeProductProjection;
   jobCapabilities(): JobRuntimeCapabilities;
@@ -152,6 +186,7 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
   readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
+  readonly runtimeInspectTool?: ToolDefinition;
   readonly extraTools: BuiltinExtraToolsAssembly;
   readonly mcpTools: McpRuntimeToolProjectionPort;
   readonly scheduler: SchedulerFacade;
@@ -165,6 +200,7 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
         ...(input.extensionTools ?? []).map(tool => tool.name),
         ...(input.communicationTools ?? []).map(tool => tool.name),
         ...(input.mcpProductTools ?? []).map((tool) => tool.name),
+        ...(input.runtimeInspectTool ? [input.runtimeInspectTool.name] : []),
         ...zhixingProfile().enabledTools,
         ...powerProfile({
           id: "capability-catalog",
@@ -191,11 +227,12 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
 function mainProductTools(
   application: WorksceneAssignmentToolApplication,
   workscenes: WorksceneToolDirectory,
+  workspaceDirectoryHint: "none" | "conditional" = "conditional",
 ): ToolDefinition[] {
   return [
-    createWorkmodeEnterTool(application, createWorksceneRunToolApplication()),
+    createWorkmodeEnterTool(application, createWorksceneRunToolApplication(), { workspaceDirectoryHint }),
     ...createWorksceneTaskTools(createWorksceneRunToolApplication()),
-    createWorksceneChangeApproveTool(application, workscenes),
+    createWorksceneChangeApproveTool(application, workscenes, { workspaceDirectoryHint }),
     createWorksceneListTool(application, workscenes),
     // 推进提议常驻会话运行时；只有宿主发送路径判定为新任务作用域的运行才启用
     createAdvancementProposalTool(),
@@ -206,13 +243,14 @@ function sceneProductTools(
   application: WorksceneAssignmentToolApplication,
   workscenes: WorksceneToolDirectory,
   scene: WorksceneRuntimeSceneIdentity,
+  workspaceDirectoryHint: "none" | "conditional" = "conditional",
 ): ToolDefinition[] {
   const identity = { sceneId: scene.sceneId, sceneName: scene.name };
   return [
     createWorkmodeExitTool(createWorksceneRunToolApplication()),
     ...createWorksceneTaskTools(createWorksceneRunToolApplication()),
     createWorksceneRenameCurrentTool(identity, application),
-    createWorksceneSetWorkdirCurrentTool(identity, application, workscenes, createWorksceneRunToolApplication()),
+    createWorksceneSetWorkdirCurrentTool(identity, application, workscenes, createWorksceneRunToolApplication(), { workspaceDirectoryHint }),
     createWorksceneClearWorkdirCurrentTool(identity, application, createWorksceneRunToolApplication()),
     createAdvancementProposalTool(),
   ];
@@ -224,6 +262,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
   readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
+  readonly runtimeInspectTool?: ToolDefinition;
   readonly agentIdentity: import("@zhixing-ai/core/identity").AgentIdentity;
   readonly capabilities: AnchorRuntimeCapabilityCatalog;
   readonly workscenes: WorksceneToolDirectory;
@@ -244,27 +283,42 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     productTools: readonly ToolDefinition[] = [],
     trustScope: ExecutionTrustScopeInput = {},
     securityOptions: RuntimeSecurityExecutionBindOptions = {},
+    options: {
+      readonly builtinOnly?: boolean;
+      readonly legacyV1Only?: boolean;
+      readonly includeWorkspaceJobTools?: boolean;
+    } = {},
   ): RuntimeProductProjection => {
     const mcp = input.mcpTools.snapshot();
+    const jobWorkspaceTools = options.includeWorkspaceJobTools
+      ? (input.extensionTools ?? []).filter((tool) => tool.name === "extension_validate")
+      : [];
     return createRuntimeProductProjection({
       runtimeTools: createRuntimeToolProjection({
         extraTools: [
           ...(input.logTools ?? []),
-          ...(productTools.length > 0 ? input.extensionTools ?? [] : []),
+          ...(productTools.length > 0 ? input.extensionTools ?? [] : jobWorkspaceTools),
           ...(productTools.length > 0 ? input.communicationTools ?? [] : []),
           ...(input.mcpProductTools ?? []).filter((tool) => tool.name !== "mcp_connect" || productTools.length > 0),
+          ...(input.runtimeInspectTool ? [input.runtimeInspectTool] : []),
           ...input.extraTools.assembleTools({ scheduler: () => executionScheduler }),
           ...mcp.tools,
           ...productTools,
         ],
         executionMcpServers: mcp.serverIds,
         implementation: input.createToolImplementation(Object.freeze({
-          kind: "assignment",
-          mode,
-          artifacts: input.skillArtifacts,
+          ...(options.builtinOnly
+            ? { kind: "builtin-only" as const, mode }
+            : { kind: "assignment" as const, mode, artifacts: input.skillArtifacts }),
         })),
       }),
-      windowPrompt: createSkillCatalogWindowPromptProjection(mode),
+      windowPrompt:
+        options.builtinOnly || options.legacyV1Only
+          ? createSkillCatalogWindowPromptProjection(mode, {
+              ...(options.builtinOnly ? { builtinOnly: true } : {}),
+              ...(options.legacyV1Only ? { legacyV1Only: true } : {}),
+            })
+          : createSkillCatalogWindowPromptProjection(mode),
       securityExecution: input.securityExecution.bind(Object.freeze(trustScope), securityOptions),
     });
   };
@@ -273,23 +327,42 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     isolated = false,
     workspaceBinding?: RuntimeWorkspaceBinding | null,
   ): ConversationRuntimeProjection => {
+    const baseProfile = zhixingProfile({ agentIdentity: input.agentIdentity, hasWorkspace: workspace !== null });
+    const effectiveProfile = isolated
+      ? Object.freeze({
+          ...baseProfile,
+          constraints: Object.freeze([...baseProfile.constraints]),
+          enabledTools: Object.freeze(
+            baseProfile.enabledTools.filter((name) => !JOB_EXCLUDED_SKILL_TOOLS.has(name)),
+          ),
+          ...(baseProfile.capabilities
+            ? { capabilities: Object.freeze({ ...baseProfile.capabilities }) }
+            : {}),
+        })
+      : baseProfile;
     const product = runtimeProduct(
       "main",
-      mainProductTools(input.worksceneAssignmentTools, input.workscenes),
+      mainProductTools(
+        input.worksceneAssignmentTools,
+        input.workscenes,
+        isolated ? "none" : "conditional",
+      ),
       workspaceBinding ? { workspace: workspaceBinding } : {},
+      {},
+      isolated ? { builtinOnly: true } : {},
     );
     return createConversationRuntimeProjection({
       ...(workspace === undefined ? {} : { workspace }),
       primaryRole: "main",
-      profile: zhixingProfile({ agentIdentity: input.agentIdentity, hasWorkspace: workspace !== null }),
+      profile: effectiveProfile,
       lifecycle: isolated ? [] : [input.createGuidanceLifecycle()],
       ...product,
-      ...(isolated ? { windowPrompt: Object.freeze({ project: async () => createKernelWindowPromptProjection({ revision: 0, segment: "skill-index", content: "" }) }) } : {}),
     });
   };
   const scene = (options: {
     readonly scene: WorksceneRuntimeSceneIdentity;
     readonly absolutePath: string | null;
+    readonly hasWorkspace?: boolean;
   }): ConversationRuntimeProjection => {
     const product = runtimeProduct(
       "work",
@@ -297,6 +370,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
         input.worksceneAssignmentTools,
         input.workscenes,
         options.scene,
+        "conditional",
       ),
       { sceneId: options.scene.sceneId },
     );
@@ -306,7 +380,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
       profile: powerProfile({
         id: options.scene.sceneId,
         name: options.scene.name,
-        hasWorkspace: options.absolutePath !== null,
+        hasWorkspace: options.hasWorkspace ?? (options.absolutePath !== null),
         hasSceneControlTools: true,
       }, { agentIdentity: input.agentIdentity }),
       lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)],
@@ -320,7 +394,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     const available = runtimeProduct("main");
     return {
       tools: [...new Set([
-        ...zhixingProfile().enabledTools,
+        ...zhixingProfile().enabledTools.filter((name) => !JOB_EXCLUDED_SKILL_TOOLS.has(name)),
         ...available.runtimeTools.extraTools.map((tool) => tool.name),
       ])].sort(),
       mcpServers: [...available.runtimeTools.executionMcpServers],
@@ -332,17 +406,38 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     workspaceBinding?: RuntimeWorkspaceBinding | null,
     manifestModelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent,
   ) => {
-    const baseProfile = zhixingProfile({ agentIdentity: input.agentIdentity });
+    const baseProfile = zhixingProfile({
+      agentIdentity: input.agentIdentity,
+      hasWorkspace: workspaceBinding !== null,
+    });
+    const isLegacyV1Job =
+      capabilities.tools.includes("load_skill") && !capabilities.tools.includes("skill_read");
     const available = runtimeProduct(
       "main",
       [],
       jobRunTrustScopeInput({ workspace: workspaceBinding }),
       { persistentApprovals: false },
+      {
+        ...(isLegacyV1Job ? { legacyV1Only: true } : {}),
+        ...(workspaceBinding ? { includeWorkspaceJobTools: true } : {}),
+      },
     );
+    const filteredBaseProfile = Object.freeze({
+      ...baseProfile,
+      constraints: Object.freeze([...baseProfile.constraints]),
+      enabledTools: Object.freeze(
+        baseProfile.enabledTools.filter(
+          (name) => !JOB_EXCLUDED_SKILL_TOOLS.has(name) || capabilities.tools.includes(name),
+        ),
+      ),
+      ...(baseProfile.capabilities
+        ? { capabilities: Object.freeze({ ...baseProfile.capabilities }) }
+        : {}),
+    });
     const selection = selectJobRuntimeTools({
       instruction,
       capabilities,
-      baseProfile,
+      baseProfile: filteredBaseProfile,
       extraTools: available.runtimeTools.extraTools,
       executionMcpServers: available.runtimeTools.executionMcpServers,
       implementation: available.runtimeTools.implementation,
@@ -412,6 +507,8 @@ export function createWorksceneConversationRuntimeFactory(input: {
     sceneId: string,
     absolutePath: string,
   ) => Promise<void>;
+  /** 本机设备标识；传入后当场景工作区属于远端执行器时，owner 侧仅保留逻辑能力画像而不解析本机路径。 */
+  readonly localDeviceId?: string;
   /** 可选：读取当前会话持久化模型覆盖（空或 follow-default 则沿用场景用途默认）。 */
   readonly readSessionModelSelection?: (
     conversationId: string,
@@ -512,12 +609,27 @@ export function createWorksceneConversationRuntimeFactory(input: {
       }
       throw error;
     }
-    const absolutePath = refreshed.kind === "scene" && refreshed.workspace
-      ? await input.resolveWorkspaceRoot(
-          current.scene.sceneId,
-          refreshed.workspace,
-        )
-      : null;
+    if (refreshed.kind !== "scene" || !refreshed.workspace) {
+      throw new Error(
+        `工作场景 "${current.scene.sceneId}" 的工作区无法在当前 executor 解析`,
+      );
+    }
+    if (
+      input.localDeviceId !== undefined &&
+      refreshed.workspace.deviceId !== input.localDeviceId
+    ) {
+      return issue(
+        input.projections.scene({
+          scene: current.scene,
+          absolutePath: null,
+          hasWorkspace: true,
+        }),
+      );
+    }
+    const absolutePath = await input.resolveWorkspaceRoot(
+      current.scene.sceneId,
+      refreshed.workspace,
+    );
     if (!absolutePath) {
       throw new Error(
         `工作场景 "${current.scene.sceneId}" 的工作区无法在当前 executor 解析`,
@@ -533,9 +645,37 @@ export function createWorksceneConversationRuntimeFactory(input: {
 /** Additive lifecycle changes must not widen an assignment that was already issued. */
 export function selectFrozenRuntimeCapabilities(projection: ConversationRuntimeProjection, expected?: import("@zhixing-ai/core/types").RuntimeExecutionProfile): ConversationRuntimeProjection {
   if (!expected) return projection;
-  return createConversationRuntimeProjection({ ...projection, runtimeTools: createRuntimeToolProjection({
-    extraTools: projection.runtimeTools.extraTools.filter((tool) => expected.tools.includes(tool.name)),
-    executionMcpServers: projection.runtimeTools.executionMcpServers.filter((id) => expected.mcpServers.includes(id)),
-    implementation: projection.runtimeTools.implementation,
-  }) });
+  const legacyV1Only =
+    expected.tools.includes("load_skill") && !expected.tools.includes("skill_read");
+  const eligibleTools = [...new Set([
+    ...projection.profile.enabledTools,
+    ...LEGACY_COMPAT_BUILTIN_TOOLS,
+  ])];
+  const filteredProfile = Object.freeze({
+    ...projection.profile,
+    constraints: Object.freeze([...projection.profile.constraints]),
+    enabledTools: Object.freeze(
+      eligibleTools.filter((name) => expected.tools.includes(name)),
+    ),
+    ...(projection.profile.capabilities
+      ? { capabilities: Object.freeze({ ...projection.profile.capabilities }) }
+      : {}),
+  });
+  return createConversationRuntimeProjection({
+    ...projection,
+    profile: filteredProfile,
+    ...(legacyV1Only
+      ? {
+          windowPrompt: createSkillCatalogWindowPromptProjection(
+            projection.primaryRole === "power" ? "work" : "main",
+            { legacyV1Only: true },
+          ),
+        }
+      : {}),
+    runtimeTools: createRuntimeToolProjection({
+      extraTools: projection.runtimeTools.extraTools.filter((tool) => expected.tools.includes(tool.name)),
+      executionMcpServers: projection.runtimeTools.executionMcpServers.filter((id) => expected.mcpServers.includes(id)),
+      implementation: projection.runtimeTools.implementation,
+    }),
+  });
 }

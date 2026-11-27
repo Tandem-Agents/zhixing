@@ -1,17 +1,25 @@
-import { open, readFile, rename, rm } from "node:fs/promises";
+import { open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { FileArtifactStore } from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
+  AssetIndexEntry,
   AssignmentGlobalQueryPort,
   ExecutionAssetBundle,
   ExecutionAssetSnapshot,
+  ExecutionAssetSnapshotV2,
   GlobalReadResult,
   GlobalStatePort,
 } from "@zhixing-ai/core/contracts";
 import {
+  projectSkillEntryToV1,
+  projectV1SkillEntryToV2,
+  type SkillCatalogEntryV2,
+} from "@zhixing-ai/core/skills/catalog";
+import {
   byteDigest,
   createSignedExecutionAssetSnapshot,
+  createSignedExecutionAssetSnapshotV2,
   protocolDigest,
   validateExecutionAssetSnapshot,
   validateGlobalQuery,
@@ -24,11 +32,37 @@ import {
   ensureDurableDirectory,
   syncDirectory,
 } from "@zhixing-ai/core/persistence";
+import {
+  assertPresentSkillEntryV2,
+  assertSkillCatalogTransitionV2,
+  executionAssetsV2Path,
+  installExecutionAssetSnapshotV2,
+  publishExecutionAssetSnapshotV2,
+  readCatalogV2FromCache,
+  readExecutionAssetSnapshotV2,
+  snapshotV2ContentIdentity,
+  writeDurableJsonV2,
+} from "./execution-asset-cache-v2.js";
 
 const EMPTY_CACHE_REVISION = 1;
 
 export interface ExecutionAssetCatalogPort extends AssignmentGlobalQueryPort {
   readArtifact(digest: string): Promise<Uint8Array | undefined>;
+  readArtifactRange?(
+    refOrDigest: ArtifactRef | string,
+    offset: number,
+    length: number,
+  ): Promise<Uint8Array | undefined>;
+}
+
+export interface ExecutionAssetV2SyncSource {
+  readonly v2Snapshot: ExecutionAssetSnapshotV2;
+  readonly indexRefs?: readonly ArtifactRef[];
+  readonly readArtifactRange: (
+    ref: ArtifactRef,
+    offset: number,
+    length: number,
+  ) => Promise<Uint8Array>;
 }
 
 /** Narrow S4 cache: signed indexes are durable; immutable bodies stay in ArtifactStore. */
@@ -50,6 +84,13 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
       : validateExecutionAssetSnapshot(value, this.verifier);
   }
 
+  async currentV2(): Promise<ExecutionAssetSnapshotV2 | undefined> {
+    return await readExecutionAssetSnapshotV2(
+      executionAssetsV2Path(this.filePath),
+      this.verifier,
+    );
+  }
+
   async readArtifact(digest: string): Promise<Uint8Array | undefined> {
     try {
       const ref = await this.artifacts.referenceForDigest(digest);
@@ -59,9 +100,41 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     }
   }
 
+  async readArtifactRange(
+    refOrDigest: ArtifactRef | string,
+    offset: number,
+    length: number,
+  ): Promise<Uint8Array | undefined> {
+    try {
+      if (typeof refOrDigest !== "string") {
+        return await this.artifacts.readRange(refOrDigest, offset, length);
+      }
+      const info = await stat(this.artifacts.pathFor({ digest: refOrDigest, bytes: 0 }));
+      if (!info.isFile()) return undefined;
+      return await this.artifacts.readRange(
+        { digest: refOrDigest, bytes: info.size },
+        offset,
+        length,
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Missing cache means builtin-only; a present but corrupt cache fails closed. */
   async read(query: Parameters<AssignmentGlobalQueryPort["read"]>[0]): Promise<GlobalReadResult> {
     const validated = validateGlobalQuery(query);
+    if (
+      validated.kind === "skill-catalog-v2" ||
+      validated.kind === "skill-get-v2"
+    ) {
+      return await readCatalogV2FromCache({
+        query: validated,
+        v1Snapshot: await this.current(),
+        v2Snapshot: await this.currentV2(),
+        artifacts: this.artifacts,
+      });
+    }
     if (
       validated.kind !== "skill-catalog" &&
       validated.kind !== "skill-get" &&
@@ -70,20 +143,64 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
       throw new Error("Execution asset cache does not expose global authority data");
     }
     const snapshot = await this.current();
+    const v2Snapshot = await this.currentV2();
+    const useV2 = Boolean(v2Snapshot && (!snapshot || v2Snapshot.snapshotRevision >= snapshot.snapshotRevision));
     if (validated.kind === "skill-catalog") {
+      if (useV2 && v2Snapshot) {
+        const filteredPairs = v2Snapshot.skills
+          .map((v2Entry) => ({
+            v2: v2Entry,
+            v1: projectSkillEntryToV1(v2Entry, "skill-catalog"),
+          }))
+          .filter(({ v1 }) =>
+            (validated.includeDisabled === true || !v1.disabled) &&
+            (validated.mode === undefined || v1.mode === validated.mode),
+          )
+          .slice(0, validated.limit ?? Number.POSITIVE_INFINITY);
+        const entries = await assertReadableSkills(
+          filteredPairs.map((pair) => pair.v1),
+          this.artifacts,
+        );
+        await Promise.all(
+          filteredPairs.map((pair) => assertPresentPackageRef(pair.v2, this.artifacts)),
+        );
+        return validateGlobalQueryResult(validated, {
+          kind: "skill-catalog",
+          catalogRevision: v2Snapshot.skillCatalogRevision,
+          entries,
+        });
+      }
+      const filteredV1 = snapshot
+        ? snapshot.skills
+            .filter((entry) =>
+              (validated.includeDisabled === true || !entry.disabled) &&
+              (validated.mode === undefined || entry.mode === validated.mode),
+            )
+            .slice(0, validated.limit ?? Number.POSITIVE_INFINITY)
+        : [];
       const entries = snapshot
-        ? await assertReadableSkills(snapshot.skills, this.artifacts)
+        ? await assertReadableSkills(filteredV1, this.artifacts)
         : [];
       return validateGlobalQueryResult(validated, {
         kind: "skill-catalog",
         catalogRevision: snapshot?.skillCatalogRevision ?? 0,
-        entries: entries.filter((entry) =>
-          (validated.includeDisabled === true || !entry.disabled) &&
-          (validated.mode === undefined || entry.mode === validated.mode),
-        ).slice(0, validated.limit ?? Number.POSITIVE_INFINITY),
+        entries,
       });
     }
     if (validated.kind === "skill-get") {
+      if (useV2 && v2Snapshot) {
+        const rawEntry = v2Snapshot.skills.find((candidate) => candidate.id === validated.skillId);
+        const entry = rawEntry ? projectSkillEntryToV1(rawEntry, "skill-catalog") : undefined;
+        if (entry && rawEntry) {
+          await assertReadableSkill(entry, this.artifacts);
+          await assertPresentPackageRef(rawEntry, this.artifacts);
+        }
+        return validateGlobalQueryResult(validated, {
+          kind: "skill-get",
+          catalogRevision: v2Snapshot.skillCatalogRevision,
+          entry: entry ?? null,
+        });
+      }
       const entry = snapshot?.skills.find((candidate) => candidate.id === validated.skillId);
       if (entry) await assertReadableSkill(entry, this.artifacts);
       return validateGlobalQueryResult(validated, {
@@ -92,19 +209,30 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
         entry: entry ?? null,
       });
     }
-    const entries = snapshot
-      ? validated.asset === "skills"
-        ? (await assertReadableSkills(snapshot.skills, this.artifacts)).map((entry) => ({
-            id: entry.id,
-            kind: "skills" as const,
-            revision: entry.revision,
-            digest: entry.contentRef.digest,
-          }))
-        : await filterReadableIndex(
-            validated.asset === "rubrics" ? snapshot.rubrics : snapshot.promptAssets,
-            this.artifacts,
-          )
-      : [];
+    const indexSnapshot = useV2 && v2Snapshot ? v2Snapshot : snapshot;
+    let entries: AssetIndexEntry[] = [];
+    if (validated.asset === "skills") {
+      const v1Skills =
+        useV2 && v2Snapshot
+          ? await assertReadableSkills(
+              v2Snapshot.skills.map((entry) => projectSkillEntryToV1(entry, "offline-asset")),
+              this.artifacts,
+            )
+          : snapshot
+            ? await assertReadableSkills(snapshot.skills, this.artifacts)
+            : [];
+      entries = v1Skills.map((entry) => ({
+        id: entry.id,
+        kind: "skills" as const,
+        revision: entry.revision,
+        digest: entry.contentRef.digest,
+      }));
+    } else if (indexSnapshot) {
+      entries = await filterPresentIndex(
+        validated.asset === "rubrics" ? indexSnapshot.rubrics : indexSnapshot.promptAssets,
+        this.artifacts,
+      );
+    }
     return validateGlobalQueryResult(validated, { kind: "asset-index", entries });
   }
 
@@ -120,10 +248,37 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
       deadlineAt: new Date(Date.parse(input.generatedAt) + 30_000).toISOString(),
       authority: { domain: "global" as const, anchorEpoch: input.anchorEpoch },
     };
-    const skillsResult = validateGlobalQueryResult(
-      { kind: "skill-catalog", includeDisabled: true },
-      await input.state.read({ kind: "skill-catalog", includeDisabled: true }, context),
-    );
+    let skillCatalogRevision: number;
+    let rawV2Skills: readonly SkillCatalogEntryV2[];
+    try {
+      const skillsV2Result = validateGlobalQueryResult(
+        { kind: "skill-catalog-v2", includeDisabled: true },
+        await input.state.read({ kind: "skill-catalog-v2", includeDisabled: true }, context),
+      );
+      if (skillsV2Result.kind !== "skill-catalog-v2") {
+        throw new TypeError("Execution asset authority returned another v2 skill catalog type");
+      }
+      skillCatalogRevision = skillsV2Result.catalogRevision;
+      rawV2Skills = skillsV2Result.entries;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !/^(?:Unexpected execution asset query: skill-catalog-v2|Global query kind is invalid|Unsupported global query)/u.test(
+          error.message,
+        )
+      ) {
+        throw error;
+      }
+      const skillsV1Result = validateGlobalQueryResult(
+        { kind: "skill-catalog", includeDisabled: true },
+        await input.state.read({ kind: "skill-catalog", includeDisabled: true }, context),
+      );
+      if (skillsV1Result.kind !== "skill-catalog") {
+        throw new TypeError("Execution asset authority returned another result type");
+      }
+      skillCatalogRevision = skillsV1Result.catalogRevision;
+      rawV2Skills = skillsV1Result.entries.map((entry) => projectV1SkillEntryToV2(entry));
+    }
     const rubricsResult = validateGlobalQueryResult(
       { kind: "asset-index", asset: "rubrics" },
       await input.state.read({ kind: "asset-index", asset: "rubrics" }, context),
@@ -138,52 +293,175 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
       // Prompt assets have no authority producer in configurations that do not enable them.
     }
     if (
-      skillsResult.kind !== "skill-catalog" ||
       rubricsResult.kind !== "asset-index" ||
       promptResult.kind !== "asset-index"
     ) {
       throw new TypeError("Execution asset authority returned another result type");
     }
-    const skills = await assertReadableSkills(skillsResult.entries, this.artifacts);
-    const rubrics = await filterReadableIndex(rubricsResult.entries, this.artifacts);
-    const promptAssets = await filterReadableIndex(promptResult.entries, this.artifacts);
-    const contentIdentity = protocolDigest("ExecutionAssetSnapshotContent", 1, {
-      skillCatalogRevision: skillsResult.catalogRevision,
-      skills,
-      rubrics,
-      promptAssets,
-    });
-    const release = await acquireFileLock(`${this.filePath}.lock`, {
+    const v2Path = executionAssetsV2Path(this.filePath);
+    const releaseV1 = await acquireFileLock(`${this.filePath}.lock`, {
       staleMs: 30_000,
       waitMs: 10_000,
       resourceName: "Execution asset snapshot",
     });
     try {
-      const current = await this.current();
-      assertSkillCatalogTransition(
-        current,
-        skillsResult.catalogRevision,
-        skills,
-      );
-      if (current && snapshotContentIdentity(current) === contentIdentity) return current;
-      const snapshotRevision = current
-        ? current.snapshotRevision + 1
-        : EMPTY_CACHE_REVISION + 1;
-      if (!Number.isSafeInteger(snapshotRevision)) {
-        throw new Error("Execution asset snapshot revision is exhausted");
+      const releaseV2 = await acquireFileLock(`${v2Path}.lock`, {
+        staleMs: 30_000,
+        waitMs: 10_000,
+        resourceName: "Execution asset snapshot v2",
+      });
+      try {
+        const currentV1 = await this.current();
+        const currentV2 = await this.currentV2();
+        const candidateV1Skills = rawV2Skills.map((entry) =>
+          projectSkillEntryToV1(entry, "offline-asset"),
+        );
+        assertSkillCatalogTransition(
+          currentV1,
+          skillCatalogRevision,
+          candidateV1Skills,
+        );
+        assertSkillCatalogTransitionV2(
+          currentV2,
+          skillCatalogRevision,
+          rawV2Skills,
+        );
+        const presentRubrics = await filterPresentIndex(rubricsResult.entries, this.artifacts);
+        const presentPromptAssets = await filterPresentIndex(promptResult.entries, this.artifacts);
+        const candidateV1Identity = protocolDigest("ExecutionAssetSnapshotContent", 1, {
+          skillCatalogRevision,
+          skills: candidateV1Skills,
+          rubrics: presentRubrics,
+          promptAssets: presentPromptAssets,
+        });
+        const candidateV2Identity = snapshotV2ContentIdentity({
+          skillCatalogRevision,
+          skills: rawV2Skills,
+          rubrics: presentRubrics,
+          promptAssets: presentPromptAssets,
+        });
+        const candidateV1Changed =
+          !currentV1 || snapshotContentIdentity(currentV1) !== candidateV1Identity;
+        const candidateV2Changed =
+          !currentV2 ||
+          snapshotV2ContentIdentity({
+            skillCatalogRevision: currentV2.skillCatalogRevision,
+            skills: currentV2.skills,
+            rubrics: currentV2.rubrics,
+            promptAssets: currentV2.promptAssets,
+          }) !== candidateV2Identity;
+        if (
+          currentV1 &&
+          currentV2 &&
+          currentV2.snapshotRevision >= currentV1.snapshotRevision &&
+          !candidateV1Changed &&
+          !candidateV2Changed
+        ) {
+          await Promise.all(
+            rawV2Skills.map((entry) => assertPresentSkillEntryV2(entry, this.artifacts)),
+          );
+          return currentV1;
+        }
+
+        const verifiedSkillRefs = new Map<string, number>();
+        for (const previous of currentV2?.skills ?? []) {
+          verifiedSkillRefs.set(previous.contentRef.digest, previous.contentRef.bytes);
+          if (previous.packageRef) {
+            verifiedSkillRefs.set(previous.packageRef.digest, previous.packageRef.bytes);
+          }
+        }
+        const v2Skills = await assertIncrementallyReadableSkillEntriesV2(
+          rawV2Skills,
+          this.artifacts,
+          verifiedSkillRefs,
+        );
+        const v1Skills = v2Skills.map((entry) => projectSkillEntryToV1(entry, "offline-asset"));
+        const verifiedIndexDigests = new Set<string>([
+          ...(currentV2?.rubrics ?? []).map((item) => item.digest),
+          ...(currentV2?.promptAssets ?? []).map((item) => item.digest),
+        ]);
+        const rubrics = await filterIncrementallyReadableIndex(
+          rubricsResult.entries,
+          this.artifacts,
+          verifiedIndexDigests,
+        );
+        const promptAssets = await filterIncrementallyReadableIndex(
+          promptResult.entries,
+          this.artifacts,
+          verifiedIndexDigests,
+        );
+        const v1ContentIdentity = protocolDigest("ExecutionAssetSnapshotContent", 1, {
+          skillCatalogRevision,
+          skills: v1Skills,
+          rubrics,
+          promptAssets,
+        });
+        const v2ContentIdentity = snapshotV2ContentIdentity({
+          skillCatalogRevision,
+          skills: v2Skills,
+          rubrics,
+          promptAssets,
+        });
+        const v1Changed =
+          !currentV1 || snapshotContentIdentity(currentV1) !== v1ContentIdentity;
+        const v2Changed =
+          !currentV2 ||
+          snapshotV2ContentIdentity({
+            skillCatalogRevision: currentV2.skillCatalogRevision,
+            skills: currentV2.skills,
+            rubrics: currentV2.rubrics,
+            promptAssets: currentV2.promptAssets,
+          }) !== v2ContentIdentity;
+        if (
+          currentV1 &&
+          currentV2 &&
+          currentV2.snapshotRevision >= currentV1.snapshotRevision &&
+          !v1Changed &&
+          !v2Changed
+        ) {
+          return currentV1;
+        }
+        const nextSnapshotRevision =
+          Math.max(
+            currentV1?.snapshotRevision ?? EMPTY_CACHE_REVISION,
+            currentV2?.snapshotRevision ?? EMPTY_CACHE_REVISION,
+          ) + 1;
+        if (!Number.isSafeInteger(nextSnapshotRevision)) {
+          throw new Error("Execution asset snapshot revision is exhausted");
+        }
+        let writtenV1: ExecutionAssetSnapshot | undefined;
+        if (v1Changed) {
+          writtenV1 = createSignedExecutionAssetSnapshot(
+            {
+              snapshotRevision: nextSnapshotRevision,
+              skillCatalogRevision,
+              skills: v1Skills,
+              rubrics,
+              promptAssets,
+              generatedAt: input.generatedAt,
+            },
+            input.signer,
+          );
+          await writeDurableJson(this.filePath, writtenV1);
+        }
+        const writtenV2 = createSignedExecutionAssetSnapshotV2(
+          {
+            snapshotRevision: nextSnapshotRevision,
+            skillCatalogRevision,
+            skills: v2Skills,
+            rubrics,
+            promptAssets,
+            generatedAt: input.generatedAt,
+          },
+          input.signer,
+        );
+        await writeDurableJsonV2(v2Path, writtenV2);
+        return writtenV1 ?? currentV1!;
+      } finally {
+        await releaseV2();
       }
-      const snapshot = createSignedExecutionAssetSnapshot({
-        snapshotRevision,
-        skillCatalogRevision: skillsResult.catalogRevision,
-        skills,
-        rubrics,
-        promptAssets,
-        generatedAt: input.generatedAt,
-      }, input.signer);
-      await writeDurableJson(this.filePath, snapshot);
-      return snapshot;
     } finally {
-      await release();
+      await releaseV1();
     }
   }
 
@@ -210,6 +488,27 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     } finally {
       await release();
     }
+  }
+
+  async publishV2FromAuthority(input: {
+    readonly state: GlobalStatePort;
+    readonly anchorEpoch: number;
+    readonly signer: ProtocolSigner;
+    readonly generatedAt: string;
+    readonly rubrics: ExecutionAssetSnapshot["rubrics"];
+    readonly promptAssets: ExecutionAssetSnapshot["promptAssets"];
+  }): Promise<ExecutionAssetSnapshotV2> {
+    return await publishExecutionAssetSnapshotV2({
+      v2FilePath: executionAssetsV2Path(this.filePath),
+      artifacts: this.artifacts,
+      state: input.state,
+      anchorEpoch: input.anchorEpoch,
+      signer: input.signer,
+      verifier: this.verifier,
+      generatedAt: input.generatedAt,
+      rubrics: input.rubrics,
+      promptAssets: input.promptAssets,
+    });
   }
 
   async bundle(): Promise<ExecutionAssetBundle | undefined> {
@@ -274,6 +573,52 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     return this.install(snapshot);
   }
 
+  async installV2(
+    snapshotInput: ExecutionAssetSnapshotV2,
+    options?: {
+      readonly signal?: AbortSignal;
+      readonly assertAuthorized?: () => void | Promise<void>;
+    },
+  ): Promise<ExecutionAssetSnapshotV2> {
+    return await installExecutionAssetSnapshotV2({
+      v2FilePath: executionAssetsV2Path(this.filePath),
+      artifacts: this.artifacts,
+      snapshot: snapshotInput,
+      verifier: this.verifier,
+      ...(options?.signal ? { signal: options.signal } : {}),
+      ...(options?.assertAuthorized ? { assertAuthorized: options.assertAuthorized } : {}),
+    });
+  }
+
+  async syncSourceV2(): Promise<ExecutionAssetV2SyncSource | undefined> {
+    const v2Snapshot = await this.currentV2();
+    if (!v2Snapshot) return undefined;
+    const refs = new Map<string, ArtifactRef>();
+    for (const item of [...v2Snapshot.rubrics, ...v2Snapshot.promptAssets]) {
+      let info: Awaited<ReturnType<typeof stat>>;
+      try {
+        info = await stat(this.artifacts.pathFor({ digest: item.digest, bytes: 0 }));
+      } catch (error) {
+        throw new Error(`Execution asset v2 index artifact missing: ${item.digest}`, {
+          cause: error,
+        });
+      }
+      if (!info.isFile()) {
+        throw new Error(`Execution asset v2 index artifact missing: ${item.digest}`);
+      }
+      refs.set(item.digest, { digest: item.digest, bytes: info.size });
+    }
+    const indexRefs = [...refs.values()].sort((left, right) =>
+      left.digest.localeCompare(right.digest, "en-US"),
+    );
+    return {
+      v2Snapshot,
+      ...(indexRefs.length > 0 ? { indexRefs } : {}),
+      readArtifactRange: (ref, offset, length) =>
+        this.artifacts.readRange(ref, offset, length),
+    };
+  }
+
 }
 
 async function assertReadableSkills(
@@ -289,7 +634,7 @@ async function assertReadableSkill(
   artifacts: FileArtifactStore,
 ): Promise<void> {
   try {
-    await artifacts.get(entry.contentRef);
+    await artifacts.readIdentity(entry.contentRef);
   } catch (error) {
     throw new Error(
       `Execution asset skill body is missing or corrupt: ${entry.id}`,
@@ -298,15 +643,94 @@ async function assertReadableSkill(
   }
 }
 
-async function filterReadableIndex(
+async function assertPresentPackageRef(
+  entry: SkillCatalogEntryV2,
+  artifacts: FileArtifactStore,
+): Promise<void> {
+  if (!entry.packageRef) return;
+  try {
+    await artifacts.readIdentity(entry.packageRef);
+  } catch (error) {
+    throw new Error(
+      `Execution asset skill body is missing or corrupt: ${entry.id}`,
+      { cause: error },
+    );
+  }
+}
+
+async function filterPresentIndex(
   entries: ExecutionAssetSnapshot["rubrics"],
   artifacts: FileArtifactStore,
 ): Promise<ExecutionAssetSnapshot["rubrics"]> {
-  const readable = await Promise.all(entries.map(async (entry) => {
-    const ref = await artifacts.referenceForDigest(entry.digest);
-    return ref && await isReadable(ref, artifacts) ? entry : undefined;
+  const present = await Promise.all(entries.map(async (entry) => {
+    try {
+      const info = await stat(artifacts.pathFor({ digest: entry.digest, bytes: 0 }));
+      return info.isFile() ? entry : undefined;
+    } catch {
+      return undefined;
+    }
   }));
-  return readable.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+  return present.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+}
+
+async function assertIncrementallyReadableSkillEntriesV2(
+  entries: readonly SkillCatalogEntryV2[],
+  artifacts: FileArtifactStore,
+  verifiedRefs: ReadonlyMap<string, number>,
+): Promise<SkillCatalogEntryV2[]> {
+  await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        await assertIncrementallyReadableRef(entry.contentRef, artifacts, verifiedRefs, `content (${entry.id})`);
+        if (entry.packageRef) {
+          await assertIncrementallyReadableRef(entry.packageRef, artifacts, verifiedRefs, `package (${entry.id})`);
+        }
+      } catch (error) {
+        throw new Error(`Execution asset v2 skill body is missing or corrupt: ${entry.id}`, {
+          cause: error,
+        });
+      }
+    }),
+  );
+  return [...entries];
+}
+
+async function assertIncrementallyReadableRef(
+  ref: ArtifactRef,
+  artifacts: FileArtifactStore,
+  verifiedRefs: ReadonlyMap<string, number>,
+  label: string,
+): Promise<void> {
+  if (verifiedRefs.get(ref.digest) === ref.bytes) {
+    await artifacts.readIdentity(ref);
+    return;
+  }
+  const bytes = await artifacts.get(ref);
+  if (bytes.byteLength !== ref.bytes || byteDigest(bytes) !== ref.digest) {
+    throw new Error(`Execution asset v2 ${label} digest mismatch`);
+  }
+}
+
+async function filterIncrementallyReadableIndex(
+  entries: ExecutionAssetSnapshot["rubrics"],
+  artifacts: FileArtifactStore,
+  verifiedDigests: ReadonlySet<string>,
+): Promise<ExecutionAssetSnapshot["rubrics"]> {
+  const verified = await Promise.all(
+    entries.map(async (entry) => {
+      if (verifiedDigests.has(entry.digest)) {
+        try {
+          const info = await stat(artifacts.pathFor({ digest: entry.digest, bytes: 0 }));
+          return info.isFile() ? entry : undefined;
+        } catch {
+          return undefined;
+        }
+      }
+      const ref = await artifacts.referenceForDigest(entry.digest);
+      return ref && (await isReadable(ref, artifacts)) ? entry : undefined;
+    }),
+  );
+  return verified.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
 }
 
 async function isReadable(ref: ArtifactRef, artifacts: FileArtifactStore): Promise<boolean> {

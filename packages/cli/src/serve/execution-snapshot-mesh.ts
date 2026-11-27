@@ -12,6 +12,13 @@ import {
 } from "@zhixing-ai/core/protocol";
 import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { ExecutionAssetV2SyncSource } from "./execution-asset-cache.js";
+import {
+  ExecutionAssetV2UnsupportedError,
+  syncExecutionAssetsV2OverMesh,
+  type ExecutionSnapshotV2SyncHandler,
+} from "./execution-snapshot-v2-sync.js";
+import { executorSupportsCrossDeviceV2 } from "./workscene-runtime-projection.js";
 
 const EXECUTION_SNAPSHOT_SERVICE = "execution.snapshot";
 
@@ -27,6 +34,11 @@ type ExecutionSnapshotRequest =
       readonly method: "install-assets";
       readonly bundle: ExecutionAssetBundle;
     };
+
+export type ExecutionAssetBundleProvider =
+  | ExecutionAssetBundle
+  | (() => Promise<ExecutionAssetBundle | undefined>)
+  | undefined;
 
 export interface ExecutionSnapshotPublisher {
   currentCapability(): Promise<ExecutorCapabilitySnapshot>;
@@ -54,9 +66,18 @@ export class MeshExecutionSnapshotClient {
 
   async installPermission(
     snapshot: TrustRuleSnapshot,
-    executionAssets?: ExecutionAssetBundle,
-    signal?: AbortSignal,
+    executionAssets?: ExecutionAssetBundleProvider,
+    executionAssetsV2OrSignal?: ExecutionAssetV2SyncSource | AbortSignal,
+    maybeSignal?: AbortSignal,
   ): Promise<ExecutorCapabilitySnapshot> {
+    const executionAssetsV2 =
+      executionAssetsV2OrSignal && !(executionAssetsV2OrSignal instanceof AbortSignal)
+        ? executionAssetsV2OrSignal
+        : undefined;
+    const signal =
+      executionAssetsV2OrSignal instanceof AbortSignal
+        ? executionAssetsV2OrSignal
+        : maybeSignal;
     const validated = validateTrustRuleSnapshot(snapshot, this.verifier);
     const permissionResult = validateExecutorCapabilitySnapshot(
       decode(await this.client.request(
@@ -70,8 +91,30 @@ export class MeshExecutionSnapshotClient {
       )) as ExecutorCapabilitySnapshot,
       this.verifier,
     );
-    if (!executionAssets) return permissionResult;
-    const bundle = decodeExecutionAssetBundle(executionAssets, this.verifier);
+    const peerSupportsV2 = executorSupportsCrossDeviceV2(permissionResult.descriptor);
+    if (executionAssetsV2 && (peerSupportsV2 || executionAssets === undefined)) {
+      try {
+        return await syncExecutionAssetsV2OverMesh({
+          client: this.client,
+          verifier: this.verifier,
+          source: executionAssetsV2,
+          signal,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof ExecutionAssetV2UnsupportedError) ||
+          peerSupportsV2 ||
+          executionAssets === undefined
+        ) {
+          throw error;
+        }
+      }
+    }
+    if (executionAssets === undefined) return permissionResult;
+    const resolvedAssets =
+      typeof executionAssets === "function" ? await executionAssets() : executionAssets;
+    if (!resolvedAssets) return permissionResult;
+    const bundle = decodeExecutionAssetBundle(resolvedAssets, this.verifier);
     return validateExecutorCapabilitySnapshot(
       decode(await this.client.request(
         EXECUTION_SNAPSHOT_SERVICE,
@@ -88,13 +131,24 @@ export function registerExecutionSnapshotMeshService(
   publisher: ExecutionSnapshotPublisher,
   authorizePeer: (deviceId: string, access: "read" | "write") => boolean,
   verifier: ProtocolSignatureVerifier,
+  v2Sync?: ExecutionSnapshotV2SyncHandler,
 ): () => void {
   return registry.register(EXECUTION_SNAPSHOT_SERVICE, {
     access: "write",
     availability: "negotiated-version",
     handler: async (payload, connection, signal) => {
       signal.throwIfAborted();
-      const request = decodeRequest(payload, verifier);
+      const raw = decode(payload);
+      if (isRecord(raw) && raw.v === 2 && v2Sync) {
+        const result = await v2Sync.handleRequest(raw, {
+          peerId: connection.peer.deviceId,
+          authorizePeer,
+          signal,
+        });
+        signal.throwIfAborted();
+        return encode(result);
+      }
+      const request = decodeRequest(raw, verifier);
       const access = request.method === "read-capability" ? "read" : "write";
       if (!authorizePeer(connection.peer.deviceId, access)) {
         throw new TypeError("Authenticated mesh peer cannot synchronize execution snapshots");
@@ -111,10 +165,9 @@ export function registerExecutionSnapshotMeshService(
 }
 
 function decodeRequest(
-  bytes: Uint8Array,
+  value: unknown,
   verifier: ProtocolSignatureVerifier,
 ): ExecutionSnapshotRequest {
-  const value = decode(bytes);
   if (!isRecord(value) || value.v !== 1) {
     throw new TypeError("Execution snapshot request is invalid");
   }

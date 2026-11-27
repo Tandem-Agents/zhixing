@@ -60,6 +60,13 @@ describe("Conversation perspective Host Correctness adapter", () => {
     expect(runOrchestrationV1).toHaveBeenCalledWith({
       ...orchestrationInput,
       parentLineage: "perspectives",
+      runContext: {
+        conversationId: "conversation-1",
+        effectivePrimaryRole: "main",
+        hasAuthorizedWorkspace: false,
+        lineageRole: "main",
+        runtimeKind: "conversation",
+      },
     });
   });
 

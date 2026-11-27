@@ -103,7 +103,7 @@ const coverageGroups = [
   ["confirmation-resolve", ["rpc:confirmation.resolve"]],
   ["confirmation-read", ["rpc:confirmation.list"]],
   ["session-observer", ["rpc:session.subscribe", "rpc:session.unsubscribe"]],
-  ["global-list-read", ["rpc:schedule.list", "rpc:workscene.list", "rpc:skill.list", "slash:tasks:repl"]],
+  ["global-list-read", ["rpc:schedule.list", "rpc:workscene.list", "rpc:skill.list", "rpc:skill.listV2", "slash:tasks:repl"]],
   ["trust-manage", ["rpc:trust.list", "rpc:trust.revoke", "slash:trust:repl"]],
   ["conversation-manage", ["rpc:session.new", "rpc:session.list", "rpc:session.resume", "rpc:conversation.program.list", "rpc:conversation.program.new", "cli:zhixing conversation list", "cli:zhixing conversation new", "slash:new:repl", "slash:resume:repl"]],
   ["conversation-window", ["rpc:session.clear", "rpc:session.compact", "slash:clear:repl", "slash:compact:repl"]],
@@ -115,7 +115,7 @@ const coverageGroups = [
   ["workscene-switch", ["rpc:workscene.enter", "rpc:workscene.exit", "rpc:workscene.tasks", "rpc:workscene.stopTask", "slash:work:repl", "slash:exit:repl", "tool:extra:workscene:enter", "tool:extra:workscene:exit", "tool:extra:workscene:task-stop"]],
   ["schedule-manage", ["rpc:schedule.create", "rpc:schedule.update", "rpc:schedule.delete", "tool:extra:schedule:manage"]],
   ["schedule-run", ["rpc:schedule.run", "rpc:schedule.abortRun", "tool:extra:schedule:run"]],
-  ["skill-manage", ["rpc:skill.archive", "rpc:skill.setState", "slash:skills:repl", "tool:builtin:save_skill", "tool:builtin:admit_skill"]],
+  ["skill-manage", ["rpc:skill.archive", "rpc:skill.setState", "rpc:skill.setVisibility", "slash:skills:repl", "tool:builtin:save_skill", "tool:builtin:skill_save", "tool:builtin:admit_skill", "tool:builtin:skill_admit"]],
   ["segment-transition", segmentLifecyclePhases.map((phase) => `lifecycle:segment:${phase}`)],
   ["workspace-binding", ["cli:zhixing workspace status", "cli:zhixing workspace list", "cli:zhixing workspace create", "cli:zhixing workspace create-scene", "cli:zhixing workspace rename", "cli:zhixing workspace repath", "cli:zhixing workspace remove", "cli:zhixing workspace reset"]],
   ["runtime-lifecycle", agentLifecyclePhases.map((phase) => `lifecycle:agent:${phase}`)],
@@ -146,7 +146,7 @@ const coverageGroups = [
     "cli:zhixing device continue",
     "slash:stop:repl",
   ]],
-  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration", "rpc:extensions.local-setup", "rpc:server.apply-model-configuration", "rpc:server.model-catalog"]],
+  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.statusV2", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration", "rpc:extensions.local-setup", "rpc:server.apply-model-configuration", "rpc:server.model-catalog"]],
   ["device-trust", [
     "cli:zhixing pair",
     "cli:zhixing duty targets",
@@ -2485,6 +2485,7 @@ export function inspectChannelRuntimeBoundary(records) {
   }
   const concreteForbidden = records.filter((record) =>
     record.relative !== "packages/cli/src/serve/channels.ts" &&
+    record.relative !== "packages/core/src/skills/generated-extension-kit-resources.ts" &&
     !record.relative.startsWith("packages/core/src/channels/") &&
     !record.relative.startsWith("packages/channels/feishu/src/") &&
     /\b(?:ChannelRegistry|ChannelAdapter|isChallengeChannel)\b/u.test(record.text)
@@ -5642,7 +5643,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
       /\b(?:WorksceneProfileInput|powerProfile|WORKING_MODE_TEXT|buildWorkingMode|workmode_\w+|workscene_\w+)\b|working-mode|work scene/iu.test(record.text),
     ) ||
     !promptBuilder.includes("tool.systemPromptGuidance") ||
-    !workmodeTools.includes("systemPromptGuidance: WORKING_MODE_TEXT") ||
+    workmodeTools.includes("systemPromptGuidance") ||
     !guidance.includes("export function powerProfile(") ||
     !guidance.includes("export const WORKING_MODE_TEXT") ||
     !product.includes('import { powerProfile } from "./workscene-agent-guidance.js"') ||
@@ -5783,14 +5784,14 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("const runtimeProduct = (") ||
     !product.includes("createRuntimeProductProjection({") ||
     !product.includes("createRuntimeToolProjection({") ||
-    !product.includes("windowPrompt: createSkillCatalogWindowPromptProjection(mode)") ||
+    !/windowPrompt:[\s\S]{0,300}createSkillCatalogWindowPromptProjection\(mode\)/u.test(product) ||
     !product.includes("createConversationRuntimeProjection({") ||
     !product.includes("securityExecution: input.securityExecution.bind(") ||
     // 各模式投影的出口恰为这一组（范围与持久批准的效果由 workscene-runtime-projection 行为测试承担，90e804bc）
     returnedPropertyNames(product, "createAnchorRuntimeProjectionAssembly") !==
       "capabilityCatalog,ephemeral,job,jobCapabilities,main,scene" ||
     !product.includes("lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)]") ||
-    !product.includes("profile: zhixingProfile(") ||
+    !product.includes("zhixingProfile(") ||
     !product.includes("profile: powerProfile(") ||
     !product.includes("selectJobRuntimeTools({") ||
     !product.includes("export function createAnchorRuntimeCapabilityCatalog(") ||
@@ -6581,9 +6582,14 @@ export function inspectStorageRemainderBoundary(records) {
   const skillAdapter = required(
     "packages/cli/src/runtime/assignment-skill-adapter.ts",
   );
-  const skillApplication = required(
-    "packages/core/src/skills/catalog-application.ts",
-  );
+  const skillApplicationFiles = [
+    required("packages/core/src/skills/catalog-application.ts"),
+    required("packages/core/src/skills/package-pagination.ts"),
+    required("packages/core/src/skills/catalog-save-service.ts"),
+    required("packages/core/src/skills/catalog-load-service.ts"),
+    required("packages/core/src/skills/catalog-admission-service.ts"),
+  ];
+  const skillApplication = skillApplicationFiles.join("\n");
   const authoritySetup = required("packages/cli/src/setup-delivery.ts");
   const advancementApplication = required(
     "packages/core/src/advancement/application.ts",
@@ -6652,7 +6658,7 @@ export function inspectStorageRemainderBoundary(records) {
   }
 
   if (
-    count(skillAdapter, 'path.join(os.tmpdir(), "zhixing-skill-admission")') !== 1 ||
+    count(skillAdapter, 'path.join(getTempRoot(), "zhixing-skill-admission")') !== 1 ||
     !skillAdapter.includes("implements SkillCatalogAdmissionCorrectnessPort") ||
     /node:(?:fs|fs\/promises|path|os)|zhixing-skill-admission/u.test(skillApplication)
   ) {
@@ -8833,6 +8839,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const packagePagination = required("packages/core/src/skills/package-pagination.ts");
+  const saveService = required("packages/core/src/skills/catalog-save-service.ts");
+  const loadService = required("packages/core/src/skills/catalog-load-service.ts");
+  const admissionService = required("packages/core/src/skills/catalog-admission-service.ts");
   const skillManagementCorrectness = required(
     "packages/core/src/skills/catalog-management-correctness.ts",
   );
@@ -9644,17 +9654,19 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/cli/src/serve/execution-asset-cache.ts",
   );
   const builtinSkill = required("packages/tools-builtin/src/skill.ts");
+  const builtinSkillV2 = required("packages/tools-builtin/src/skill-v2.ts");
   const builtinFactories = required("packages/tools-builtin/src/factories.ts");
   const builtinIndex = required("packages/tools-builtin/src/index.ts");
-  const admissionStart = application.indexOf(
-    "export interface SkillCatalogAdmissionRequest",
-  );
-  const saveApplication = admissionStart >= 0
-    ? application.slice(0, admissionStart)
-    : application;
+  const saveApplication = saveService;
+  const loadApplication = loadService;
 
   if (
     skillIndex.includes("catalog-application") ||
+    skillIndex.includes("catalog-save-service") ||
+    skillIndex.includes("catalog-load-service") ||
+    skillIndex.includes("catalog-admission-service") ||
+    skillIndex.includes("package-pagination") ||
+    packagePagination.length === 0 ||
     skillIndex.includes("catalog-management-correctness") ||
     skillIndex.includes("createAnchorSkillCatalogManagementCorrectnessPort") ||
     skillIndex.includes("SkillCatalogClient") ||
@@ -10223,7 +10235,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     );
   }
   if (
-    !skillAuthority.includes("reducerVersion: 2") ||
+    !skillAuthority.includes("reducerVersion: 3") ||
     skillAuthority.split("#assertCommittedMutation(").length - 1 < 3 ||
     !skillAuthority.includes("await this.#refreshDurableProjection()") ||
     skillAuthority.includes("skillPendingKey(")
@@ -10321,7 +10333,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "export interface SkillCatalogKernelProjectionSource",
   );
   const projectionEnd = application.indexOf(
-    "/** Skill-owned input for the save_skill create/update use case.",
+    "export type SkillCatalogApplicationErrorCode",
   );
   const projectionApplication = projectionStart >= 0 && projectionEnd > projectionStart
     ? application.slice(projectionStart, projectionEnd)
@@ -10384,19 +10396,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     !saveApplication.includes("class SkillCatalogSaveApplicationService") ||
     !saveApplication.includes("interface SkillCatalogSaveCorrectnessPort") ||
-    !saveApplication.includes("scrubSecrets(draft.name)") ||
+    !saveApplication.includes("scrubSecrets(rawName)") ||
     !saveApplication.includes("stringifyFrontmatter(") ||
-    !saveApplication.includes("skillNameToId(normalized.name)")
+    !saveApplication.includes("skillNameToId(normalizedName)")
   ) {
     failures.push("Skill Catalog save invariants lack one domain application owner");
   }
-  const loadStart = application.indexOf("export interface SkillCatalogLoadRequest");
-  const loadEnd = application.indexOf(
-    "/** Skill-owned request for the admit_skill two-stage lifecycle.",
-  );
-  const loadApplication = loadStart >= 0 && loadEnd > loadStart
-    ? application.slice(loadStart, loadEnd)
-    : "";
   if (
     !loadApplication.includes("class SkillCatalogLoadApplicationService") ||
     !loadApplication.includes("interface SkillCatalogLoadCorrectnessPort") ||
@@ -10421,18 +10426,18 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Skill Catalog usage must stage only after artifact read and document parsing");
   }
   if (
-    !application.includes("class SkillCatalogAdmissionApplicationService") ||
-    !application.includes("interface SkillCatalogAdmissionCorrectnessPort") ||
-    !application.includes("readonly #pending = new Map") ||
-    !application.includes("await assessSkill(") ||
-    !application.includes("ADMISSION_TOKEN_TTL_MS") ||
-    !application.includes("candidate.digest !== pending.digest") ||
-    !application.includes("`${operationId}:admit`")
+    !admissionService.includes("class SkillCatalogAdmissionApplicationService") ||
+    !admissionService.includes("interface SkillCatalogAdmissionCorrectnessPort") ||
+    !admissionService.includes("readonly #pending = new Map") ||
+    !admissionService.includes("await assessSkillPackage(") ||
+    !admissionService.includes("ADMISSION_TOKEN_TTL_MS") ||
+    !admissionService.includes("candidate.digest !== pending.digest") ||
+    !admissionService.includes("`${operationId}:admit`")
   ) {
     failures.push("Skill Catalog admission lifecycle lacks one domain application owner");
   }
-  const admitArtifact = application.lastIndexOf("await this.correctness.putContent(");
-  const admitStage = application.lastIndexOf("await this.correctness.stage(");
+  const admitArtifact = admissionService.lastIndexOf("await this.correctness.putContent(");
+  const admitStage = admissionService.lastIndexOf("await this.correctness.stage(");
   if (!(admitArtifact >= 0 && admitStage > admitArtifact)) {
     failures.push("Skill Catalog admit must stage only after its content artifact exists");
   }
@@ -10805,7 +10810,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     !application.includes("export interface SkillCatalogClient") ||
-    !application.includes("query(query: SkillCatalogQuery): Promise<SkillCatalogView>") ||
+    !application.includes("query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2>") ||
     !application.includes("command(command: SkillCatalogCommand): Promise<void>") ||
     !application.includes("onFact(handler: (fact: SkillCatalogChangedFact) => void): () => void")
   ) {
@@ -10908,6 +10913,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ["packages/cli/src/runtime/assignment-skill-adapter.ts", assignmentSkillAdapter],
     ["packages/cli/src/runtime/skill-catalog-window-projection.ts", skillWindowProjection],
     ["packages/tools-builtin/src/skill.ts", builtinSkill],
+    ["packages/tools-builtin/src/skill-v2.ts", builtinSkillV2],
     ["packages/tools-builtin/src/factories.ts", builtinFactories],
   ]) {
     if (!text.includes('from "@zhixing-ai/core/skills/catalog"')) {
@@ -11034,7 +11040,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !assignmentSkillAdapter.includes("new SkillCatalogAdmissionApplicationService(") ||
     !assignmentSkillAdapter.includes("implements SkillCatalogAdmissionCorrectnessPort") ||
     !assignmentSkillAdapter.includes("acquireLocalCandidate(") ||
-    !assignmentSkillAdapter.includes("assertRegularCandidateTree(") ||
+    !assignmentSkillAdapter.includes("stageLocalSkillPackage(") ||
     assignmentSkillAdapter.includes("class SkillAdmissionWorkspace")
   ) {
     failures.push("Orchestrator does not provide the path-free Skill admission adapter");
@@ -11072,14 +11078,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push("save_skill binding must consume only the Skill-owned application contract");
   }
+  const combinedBuiltinSkill = `${builtinSkill}\n${builtinSkillV2}`;
   if (
     !builtinSkill.includes("application: SkillCatalogAdmissionApplication") ||
-    !builtinSkill.includes("await application.admit(") ||
-    builtinSkill.includes("new Map<string, PendingAdmission>") ||
-    builtinSkill.includes("function firstCall(") ||
-    builtinSkill.includes("function confirmAdmission(") ||
-    builtinSkill.includes("computeStagingDigest") ||
-    builtinSkill.includes("acquireToStaging")
+    !builtinSkillV2.includes("application: SkillCatalogAdmissionApplication") ||
+    !builtinSkillV2.includes("await application.admit(") ||
+    combinedBuiltinSkill.includes("new Map<string, PendingAdmission>") ||
+    combinedBuiltinSkill.includes("function firstCall(") ||
+    combinedBuiltinSkill.includes("function confirmAdmission(") ||
+    combinedBuiltinSkill.includes("computeStagingDigest") ||
+    combinedBuiltinSkill.includes("acquireToStaging") ||
+    /\bSkillAdmissionPort\b/u.test(combinedBuiltinSkill)
   ) {
     failures.push("admit_skill binding retains a parallel admission state machine");
   }
@@ -11130,7 +11139,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     !handler.includes("requireProductApi(ctx.server).query(SKILL_CATALOG_LIST_QUERY") ||
-    handler.split("requireProductApi(ctx.server).command(").length - 1 !== 2 ||
+    handler.split("requireProductApi(ctx.server).command(").length - 1 !== 3 ||
     /\bSkillCatalogApplication\b/u.test(handler) ||
     handler.includes(".execute({")
   ) {
@@ -12316,6 +12325,7 @@ export function inspectRecoveryBackupAssembly(records) {
     "packages/cli/src/serve/backup-target-config-infrastructure.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
   ].sort();
   const backupTargetWrite = backupTargetInfrastructure.indexOf("await writeFile(temporary");
@@ -15717,6 +15727,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "sessionState",
       "statusHistory",
       "taskLists",
+      "findDurableRunByIngress",
       "currentAuthority",
       "subscribeConversationFacts",
       "inspectProgramInputReceipt",

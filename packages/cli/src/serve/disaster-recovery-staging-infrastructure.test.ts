@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { access } from "node:fs/promises";
+import { access, copyFile, readFile, rm, stat, truncate, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import type { ArtifactRef, DeviceIdentity } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { createDisasterRecoveryStagingInfrastructure } from
@@ -33,6 +34,7 @@ describe("disaster-recovery staging infrastructure", () => {
 
     expect(Object.keys(first)).toEqual([
       "openTarget",
+      "preserveLiveRestorePoint",
       "cleanupPostInstall",
       "cleanupCurrentDevice",
       "close",
@@ -134,6 +136,181 @@ describe("disaster-recovery staging infrastructure", () => {
 
     await staging.cleanupCurrentDevice();
     await expect(access(stagingRoot(home))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("aborts without restore-point.json on EIO or missing artifact and succeeds on retry with same transferId", async () => {
+    const home = await createTempDir("disaster-recovery-restore-retry");
+    const shared = new FileArtifactStore(path.join(home, "distributed-runtime", "artifacts"));
+    const liveLog = new FileAuthorityCommitLog(
+      path.join(home, "distributed-runtime", "authority"),
+      shared,
+      { clock: () => "2026-11-26T00:00:00.000Z" },
+    );
+    const staging = createDisasterRecoveryStagingInfrastructure({ zhixingHome: home });
+    onTestFinished(async () => {
+      await staging.close();
+      await liveLog.stopStorageMaintenance();
+    });
+
+    const contentRef = await shared.put(Buffer.from("live-skill-doc", "utf8"));
+    await liveLog.append([{
+      stream: "control",
+      body: { t: "skill-create-v2", skillId: "live-skill", contentRef },
+    }]);
+
+    // 1. EIO during rebuildProjection aborts without publishing restore-point.json
+    const restoreManifest = path.join(home, "recovery-restore-points", TRANSFER_ID, "restore-point.json");
+    let injectReadError = true;
+    const wrappedLog: Pick<FileAuthorityCommitLog, "checkpoint" | "originCheckpoint" | "rebuildProjection"> = {
+      checkpoint: () => liveLog.checkpoint(),
+      originCheckpoint: () => liveLog.originCheckpoint(),
+      rebuildProjection: async (initial, reducer, options) => {
+        if (injectReadError) {
+          throw Object.assign(new Error("EIO: disk read failed"), { code: "EIO" });
+        }
+        return liveLog.rebuildProjection(initial, reducer, options);
+      },
+    };
+    await expect(
+      staging.preserveLiveRestorePoint!({
+        transferId: TRANSFER_ID,
+        authorityLog: wrappedLog,
+        sharedArtifacts: shared,
+      }),
+    ).rejects.toThrow("EIO");
+    await expect(stat(restoreManifest)).rejects.toMatchObject({ code: "ENOENT" });
+
+    // 2. Missing referenced artifact throws instead of skipping silently
+    const missingRef = artifactRef(Buffer.from("missing-blob", "utf8"));
+    await expect(
+      staging.preserveLiveRestorePoint!({
+        transferId: SECOND_TRANSFER_ID,
+        authorityLog: {
+          checkpoint: () => liveLog.checkpoint(),
+          originCheckpoint: () => liveLog.originCheckpoint(),
+          rebuildProjection: async () => ([{
+            v: 2,
+            lsn: 1,
+            stream: "control",
+            at: "2026-11-26T00:00:00.000Z",
+            entries: [{ stream: "control", body: { t: "ref-holder", ref: missingRef } }],
+          }] as never),
+        },
+        sharedArtifacts: shared,
+      }),
+    ).rejects.toThrow();
+
+    // 3. Same transferId retries cleanly once EIO clears and publishes full manifest + artifacts
+    injectReadError = false;
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+    const liveCheckpoint = await liveLog.checkpoint();
+    const saved = JSON.parse(await readFile(restoreManifest, "utf8")) as {
+      v: number;
+      checkpoint?: unknown;
+      checkpointLsn: number;
+      hasAuthorityIdentity?: boolean;
+      artifacts: ArtifactRef[];
+    };
+    expect(saved.v).toBe(1);
+    expect(saved.checkpointLsn).toBe(1);
+    expect(canonicalize(saved.checkpoint)).toBe(canonicalize(liveCheckpoint));
+    expect(saved.hasAuthorityIdentity).toBe(false);
+    expect(saved.artifacts).toHaveLength(1);
+
+    // 4. Same-length artifact tamper at FileArtifactStore layout + missing authority-envelopes.json -> rebuilt bit-exact
+    const restoreDir = path.join(home, "recovery-restore-points", TRANSFER_ID);
+    const restoreArtStore = new FileArtifactStore(path.join(restoreDir, "artifacts"));
+    const artFile = restoreArtStore.pathFor(contentRef);
+    await writeFile(artFile, Buffer.from("CORRUPTED_BYTE", "utf8"));
+    await unlink(path.join(restoreDir, "authority-envelopes.json"));
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+    expect(await readFile(artFile, "utf8")).toBe("live-skill-doc");
+    expect(JSON.parse(await readFile(path.join(restoreDir, "authority-envelopes.json"), "utf8"))).toHaveLength(1);
+
+    // 5. Same-LSN foreign WAL mismatch (different-test-fact, lsn === 1) -> detected via full checkpoint/replay & rebuilt
+    const foreignDir = path.join(home, "foreign-wal");
+    const foreignArt = new FileArtifactStore(path.join(home, "foreign-art"));
+    const foreignLog = new FileAuthorityCommitLog(foreignDir, foreignArt, {
+      clock: () => "2026-11-26T00:00:00.000Z",
+    });
+    try {
+      await foreignLog.append([{ stream: "control", body: { t: "different-test-fact" } }]);
+      expect((await foreignLog.checkpoint()).lsn).toBe(liveCheckpoint.lsn);
+      expect(canonicalize(await foreignLog.checkpoint())).not.toBe(canonicalize(liveCheckpoint));
+    } finally {
+      await foreignLog.stopStorageMaintenance();
+    }
+    await copyFile(path.join(foreignDir, "authority.log"), path.join(restoreDir, "authority.log"));
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+
+    // 6. Truncated authority.log -> detected via cold-open & rebuilt cleanly; companion .identity loss detected & rebuilt
+    await truncate(path.join(restoreDir, "authority.log"), 8);
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+
+    await writeFile(liveLog.identityPath, Buffer.from("live-identity-companion", "utf8"));
+    const liveWithIdCheckpoint = await liveLog.checkpoint();
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+    expect(
+      (JSON.parse(await readFile(restoreManifest, "utf8")) as { hasAuthorityIdentity?: boolean }).hasAuthorityIdentity,
+    ).toBe(true);
+    await unlink(path.join(restoreDir, "authority.log.identity"));
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+    expect((await stat(path.join(restoreDir, "authority.log.identity"))).size).toBeGreaterThan(0);
+
+    // 7. Intact retry is idempotent; then stop & delete live source and cold-open restoreDir via FileArtifactStore
+    await staging.preserveLiveRestorePoint!({
+      transferId: TRANSFER_ID,
+      authorityLog: liveLog,
+      sharedArtifacts: shared,
+    });
+    await staging.close();
+    await liveLog.stopStorageMaintenance();
+    await rm(path.join(home, "distributed-runtime", "authority"), { recursive: true, force: true });
+    await rm(path.join(home, "distributed-runtime", "artifacts"), { recursive: true, force: true });
+
+    const isolatedArtifacts = new FileArtifactStore(path.join(restoreDir, "artifacts"));
+    const probeLog = new FileAuthorityCommitLog(
+      restoreDir,
+      isolatedArtifacts,
+      { readOnly: true, owner: false },
+    );
+    try {
+      expect(canonicalize(await probeLog.checkpoint())).toBe(canonicalize(liveWithIdCheckpoint));
+      const replayedBodies = await probeLog.rebuildProjection<Array<{ t?: string; skillId?: string; contentRef?: ArtifactRef }>>(
+        [],
+        (items, record) => [...items, record.body as { t?: string; skillId?: string; contentRef?: ArtifactRef }],
+      );
+      expect(replayedBodies).toHaveLength(1);
+      expect(replayedBodies[0]?.t).toBe("skill-create-v2");
+      const recoveredBytes = await isolatedArtifacts.get(replayedBodies[0]!.contentRef!);
+      expect(Buffer.from(recoveredBytes).toString("utf8")).toBe("live-skill-doc");
+    } finally {
+      await probeLog.stopStorageMaintenance();
+    }
   });
 });
 

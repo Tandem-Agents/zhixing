@@ -63,6 +63,8 @@ export type ExecuteRecoveredPerspectivePort = (input: {
   readonly source: "interactive" | "channel";
   readonly abortSignal?: AbortSignal;
   readonly turnContext: NonNullable<RunTurnOptions["turnContext"]>;
+  readonly runId?: string;
+  readonly assignmentId?: string;
   readonly authorizeToolExecution?: NonNullable<
     RunTurnOptions["authorizeToolExecution"]
   >;
@@ -939,6 +941,8 @@ export class RecoveryScheduler {
             source: invocation.source,
             ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
             turnContext: options.turnContext,
+            ...(runtimeOptions?.runId ? { runId: runtimeOptions.runId } : {}),
+            ...(runtimeOptions?.assignmentId ? { assignmentId: runtimeOptions.assignmentId } : {}),
             authorizeToolExecution: runtimeOptions?.authorizeToolExecution,
             ...(meter
               ? {
