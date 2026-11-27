@@ -2,7 +2,7 @@
 
 **随模型能力提升可能被吸收的部分做轻，支撑部分做重。**
 
-贴近模型的 Harness 隐含着对当前模型能力局限的假设，会随模型进步而过时；应将其与会话状态、执行环境解耦，让 Harness 保持可演进、可替换，把稳定接口与耐久运行支撑沉淀为长期底座。
+模型能力代偿以阶段性局限为前提，会随模型进步而过时乃至反成掣肘；面向真实环境约束与受控运行的基础机制则独立于模型强弱。应将二者解耦，使代偿设计保持轻量、可替换与可退场而不侵入核心结构，把稳定契约与确定性支撑沉淀为长期底座。
 
 > "Harnesses encode assumptions about what Claude can’t do on its own. However, those assumptions need to be frequently questioned because they can go stale as models improve."
 >
